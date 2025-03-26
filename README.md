@@ -14,6 +14,7 @@
 * trian_clsassifier_ref.py: original one of PointNetLK
 * trian_pointlk_ref.py: original one of PointNetLK
 
+I only changed `train_classifier.py`, `train_pointlk.py` and `datasets.py`, compared with original PointNetLK
 
 ### Bash shell scripts for cluster qsub:
 * train_c3vd.sh: train PointNet classifier and transfer to PointNet-LK for C3VD
