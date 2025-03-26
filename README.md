@@ -1,31 +1,24 @@
-# PointNetLK: Point Cloud Registration using PointNet
-
-### [Video](https://youtu.be/J2ClR5OZuLc)
-
-Source Code Author:
-Yasuhiro Aoki
+# PointNetLK: Point Cloud Registration using PointNet for C3VD
 
 ### Requires:
-* PyTorch 0.4.0 (perhaps, 0.4.1 (the latest) will be OK.) and torchvision
+* PyTorch and torchvision
 * NumPy
 * SciPy
 * MatPlotLib
-* ModelNet40
+* plyfile
 
 ### Main files for experiments:
-* train_classifier.py: train PointNet classifier (used for transfer learning)
-* train_pointlk.py: train PointNet-LK
-* generate_rotation.py: generate 6-dim perturbations (rotation and translation) (for testing)
-* test_pointlk.py: test PointNet-LK
-* test_icp.py: test ICP
-* result_stat.py: compute mean errors of above tests
+* train_classifier.py: train PointNet classifier for c3vd
+* train_pointlk.py: train PointNet-LK for c3vd
+* ./ptlk/data/datasets.py: add C3VD class
+* trian_clsassifier_ref.py: original one of PointNetLK
+* trian_pointlk_ref.py: original one of PointNetLK
 
-### Examples (Bash shell scripts):
-* ex1_train.sh: train PointNet classifier and transfer to PointNet-LK.
-* ex1_genrot.sh: generate perturbations for testing
-* ex1_test_pointlk.sh: test PointNet-LK
-* ex1_test_icp.sh: test ICP
-* ex1_result_stat.sh: compute mean errors of above tests
+
+### Bash shell scripts for cluster qsub:
+* train_c3vd.sh: train PointNet classifier and transfer to PointNet-LK for C3VD
+* ex1_train.sh: original one of PointNetLK
+
 
 ### Citation
 
