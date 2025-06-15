@@ -1,0 +1,28 @@
+🧠 PointNet C3VD配准模型测试配置
+=====================================
+测试完成时间: Tue 10 Jun 04:32:16 BST 2025
+
+🔧 模型配置:
+模型类型: PointNet配准模型
+特征维度: 1024
+聚合函数: max
+LK最大迭代: 20
+LK步长: 1.0e-2
+
+📊 测试配置:
+数据集路径: /SAN/medic/MRpcr/C3VD_datasets
+类别文件: /SAN/medic/MRpcr/PointNetLK_c3vd/experiments/sampledata/c3vd.txt
+配对模式: one_to_one
+点云数量: 1024
+最大测试样本: 1000
+设备: cuda:0
+扰动目录: /SAN/medic/MRpcr/PointNetLK_c3vd/gt
+联合归一化: 是
+
+📁 模型文件:
+配准模型: /SAN/medic/MRpcr/PointNetLK_c3vd/results/c3vd_pointlk_0320_model_best.pth
+分类器模型: /SAN/medic/MRpcr/PointNetLK_c3vd/results/c3vd_augmented/c3vd_classifier_0529_feat_best.pth
+
+📁 输出文件:
+测试结果前缀: /SAN/medic/MRpcr/PointNetLK_c3vd/results/test_results/results
+测试日志: /SAN/medic/MRpcr/PointNetLK_c3vd/results/test_results/test_log_0610.log

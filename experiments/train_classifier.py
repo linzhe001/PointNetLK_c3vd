@@ -20,10 +20,15 @@ import numpy as np
 import time
 import gc
 import random
+import math
 
 # addpath('../')
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
 import ptlk
+from ptlk import attention_v1
+from ptlk import mamba3d_v1  # 导入Mamba3D模块
+from ptlk import fast_point_attention  # 导入快速点注意力模块
+from ptlk import cformer  # 导入Cformer模块
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -51,8 +56,38 @@ def options(argv=None):
                         help='flag for setting up PointNet with TNet')
     parser.add_argument('--dim-k', default=1024, type=int,
                         metavar='K', help='dim. of the feature vector (default: 1024)')
-    parser.add_argument('--symfn', default='max', choices=['max', 'avg'],
+    parser.add_argument('--symfn', default='max', choices=['max', 'avg', 'selective'],
                         help='symmetric function (default: max)')
+
+    # 添加模型选择参数
+    parser.add_argument('--model-type', default='pointnet', choices=['pointnet', 'attention', 'mamba3d', 'fast_attention', 'cformer'],
+                        help='选择模型类型: pointnet、attention、mamba3d、fast_attention或cformer (默认: pointnet)')
+    
+    # 添加attention模型特定参数
+    parser.add_argument('--num-attention-blocks', default=3, type=int,
+                        metavar='N', help='attention模块中的注意力块数量 (默认: 3)')
+    parser.add_argument('--num-heads', default=8, type=int,
+                        metavar='N', help='多头注意力的头数 (默认: 8)')
+                        
+    # 添加Mamba3D模型特定参数
+    parser.add_argument('--num-mamba-blocks', default=3, type=int,
+                        metavar='N', help='Mamba3D模块中的Mamba块数量 (默认: 3)')
+    parser.add_argument('--d-state', default=16, type=int,
+                        metavar='N', help='Mamba状态空间维度 (默认: 16)')
+    parser.add_argument('--expand', default=2, type=float,
+                        metavar='N', help='Mamba扩展因子 (默认: 2)')
+
+    # 添加快速点注意力模型特定参数
+    parser.add_argument('--num-fast-attention-blocks', default=2, type=int,
+                        metavar='N', help='快速点注意力模块中的注意力块数量 (默认: 2)')
+    parser.add_argument('--fast-attention-scale', default=1, type=int,
+                        metavar='N', help='快速点注意力模型的规模缩放因子 (默认: 1, 更大值表示更轻量的模型)')
+
+    # 添加Cformer模型特定参数
+    parser.add_argument('--num-proxy-points', default=8, type=int,
+                        metavar='N', help='Cformer模型中的代理点数量 (默认: 8)')
+    parser.add_argument('--num-blocks', default=2, type=int,
+                        metavar='N', help='Cformer模型中的块数量 (默认: 2)')
 
     # settings for on training
     parser.add_argument('-l', '--logfile', default='', type=str,
@@ -78,9 +113,13 @@ def options(argv=None):
     parser.add_argument('--drop-last', action='store_true',
                         help='Drop the last incomplete batch')
     
-    # Scene split parameter
-    parser.add_argument('--scene-split', action='store_true',
-                        help='Split train and validation sets by scene')
+    # 在参数解析器部分添加新的学习率调度参数
+    parser.add_argument('--base-lr', default=None, type=float,
+                        help='基础学习率，自动设置为优化器初始学习率')
+    parser.add_argument('--warmup-epochs', default=5, type=int,
+                        metavar='N', help='学习率预热轮次数 (默认: 5)')
+    parser.add_argument('--cosine-annealing', action='store_true',
+                        help='使用余弦退火学习率策略')
 
     args = parser.parse_args(argv)
     return args
@@ -110,34 +149,6 @@ def run(args, trainset, testset, action):
     args.device = torch.device(args.device)
     print(f"Using device: {args.device}")
     
-    # Test CUDA speed
-    if str(args.device) != 'cpu':
-        print("\n====== CUDA Speed Test ======")
-        # Test matrix multiplication speed on GPU
-        test_size = 1000
-        cpu_tensor = torch.randn(test_size, test_size)
-        start = time.time()
-        cpu_result = cpu_tensor @ cpu_tensor
-        cpu_time = time.time() - start
-        
-        gpu_tensor = torch.randn(test_size, test_size, device=args.device)
-        # Warm up GPU
-        for _ in range(5):
-            _ = gpu_tensor @ gpu_tensor
-        torch.cuda.synchronize()
-        
-        start = time.time()
-        gpu_result = gpu_tensor @ gpu_tensor
-        torch.cuda.synchronize()
-        gpu_time = time.time() - start
-        
-        print(f"CPU matrix multiplication ({test_size}x{test_size}) time: {cpu_time:.4f} sec")
-        print(f"GPU matrix multiplication ({test_size}x{test_size}) time: {gpu_time:.4f} sec")
-        print(f"Speed-up factor: {cpu_time/gpu_time:.1f}x")
-        
-        if cpu_time/gpu_time < 5:
-            print("Warning: GPU acceleration is less than 5x, possible CUDA configuration issue")
-
     # Dataset information
     print(f"\n====== Dataset Information ======")
     print(f"Training set: {len(trainset)} samples, Test set: {len(testset)} samples")
@@ -170,7 +181,7 @@ def run(args, trainset, testset, action):
     trainloader = torch.utils.data.DataLoader(
         trainset,
         batch_size=args.batch_size, shuffle=True, 
-        num_workers=min(args.workers, 2),  # Reduce worker count
+        num_workers=min(args.workers, 4),  # Reduce worker count
         drop_last=args.drop_last,
         pin_memory=(str(args.device) != 'cpu'))  # Use pin_memory for acceleration
     
@@ -183,69 +194,100 @@ def run(args, trainset, testset, action):
     
     print(f"Training batches: {len(trainloader)}, Test batches: {len(testloader)}")
     
-    # Check first batch and measure loading time
-    print("\n====== Testing Data Loading Performance ======")
-    data_load_start = time.time()
-    for data in trainloader:
-        points, target = data
-        data_load_time = time.time() - data_load_start
-        print(f"First batch loading time: {data_load_time:.4f} sec")
-        print(f"First batch shapes: points={points.shape}, target={target.shape}")
-        
-        # Test batch processing time
-        if str(args.device) != 'cpu':
-            points = points.to(args.device)
-            target = target.to(args.device)
-            torch.cuda.synchronize()
-            forward_start = time.time()
-            output = model(points)
-            torch.cuda.synchronize()
-            forward_time = time.time() - forward_start
-            print(f"Forward pass time: {forward_time:.4f} sec")
-            print(f"Estimated total time per batch: {data_load_time + forward_time:.4f} sec")
-        break
-    
     # Optimizer
     min_loss = float('inf')
     learnable_params = filter(lambda p: p.requires_grad, model.parameters())
     if args.optimizer == 'Adam':
-        optimizer = torch.optim.Adam(learnable_params, lr=0.0001, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(learnable_params, lr=0.001, weight_decay=1e-6)
     else:
-        optimizer = torch.optim.SGD(learnable_params, lr=0.001, momentum=0.9, weight_decay=1e-4)
+        optimizer = torch.optim.SGD(learnable_params, lr=0.01, momentum=0.9, weight_decay=1e-5)
 
     if checkpoint is not None:
         min_loss = checkpoint['min_loss']
         optimizer.load_state_dict(checkpoint['optimizer'])
     
-    # Add learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    # 定义学习率调度函数
+    def adjust_learning_rate(epoch, optimizer, base_lr, warmup_epochs=5, cosine_annealing=True, max_epochs=200):
+        """
+        高级学习率调度函数，包含预热期和余弦退火
+        
+        Args:
+            epoch: 当前训练轮次
+            optimizer: 优化器实例
+            base_lr: 基础学习率
+            warmup_epochs: 预热期轮次数
+            cosine_annealing: 是否使用余弦退火
+            max_epochs: 总训练轮次
+        
+        Returns:
+            当前学习率
+        """
+        # 最后50个epoch使用最低学习率
+        if epoch >= max_epochs - 50:
+            lr = 1e-7
+        elif epoch < warmup_epochs:
+            # 预热阶段：从很小的学习率线性增加到基础学习率
+            lr = base_lr * (epoch + 1) / warmup_epochs
+        elif cosine_annealing:
+            # 余弦退火：在预热后逐渐减小学习率
+            lr = base_lr * 0.5 * (1 + math.cos(math.pi * (epoch - warmup_epochs) / (max_epochs - warmup_epochs - 50)))
+        else:
+            # 确保学习率不会太小
+            lr = max(base_lr, 1e-7)
+        
+        # 更新所有参数组的学习率
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        return lr
+    
+    # 基础学习率 - 用于计算学习率调度
+    base_lr = args.base_lr if args.base_lr is not None else (0.001 if args.optimizer == 'Adam' else 0.01)
+    
+    # 学习率预热和余弦退火参数
+    warmup_epochs = args.warmup_epochs
+    cosine_annealing = args.cosine_annealing
+    
+    print(f"\n====== lr_scheduler ======")
+    print(f"base_lr: {base_lr}")
+    print(f"warmup_epochs: {warmup_epochs}")
+    print(f"cosine_annealing: {cosine_annealing}")
 
     # Training
     print("\n====== Starting Training ======")
     LOGGER.debug('train, begin')
     
     total_start_time = time.time()
+    best_epoch = 0  # 初始化best_epoch变量
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start = time.time()
+        
+        # 在每个epoch开始前更新学习率
+        lr = adjust_learning_rate(epoch, optimizer, base_lr, 
+                                 warmup_epochs=warmup_epochs, 
+                                 cosine_annealing=cosine_annealing, 
+                                 max_epochs=args.epochs)
         
         running_loss, running_info = action.train_1(model, trainloader, optimizer, args.device)
         print("\n====== Starting Validation ======")
         val_loss, val_info = action.eval_1(model, testloader, args.device)
-        
-        # Update learning rate
-        scheduler.step(val_loss)
         
         epoch_time = time.time() - epoch_start
         
         is_best = val_loss < min_loss
         min_loss = min(val_loss, min_loss)
 
-        print(f"[Time] Epoch {epoch+1}: {epoch_time:.2f} sec | Loss: {running_loss:.4f} | Validation: {val_loss:.4f} | Accuracy: {running_info:.2f}")
+        # 获取当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+
+        print(f"[Time] Epoch {epoch+1}: {epoch_time:.2f} sec | Loss: {running_loss:.4f} | Validation: {val_loss:.4f} | Accuracy: {running_info:.2f} | LR: {current_lr:.8f}")
+        print(f"[Info] Best epoch: {best_epoch}")
         
-        LOGGER.info('epoch, %04d, %f, %f, %f, %f', epoch + 1, running_loss, val_loss, running_info, val_info)
+        LOGGER.info('epoch, %04d, %f, %f, %f, %f, %04d, %f', epoch + 1, running_loss, val_loss, running_info, val_info, best_epoch, current_lr)
         snap = {'epoch': epoch + 1,
                 'model': model.state_dict(),
                 'min_loss': min_loss,
+                'best_epoch': best_epoch,  # 保存最佳epoch信息
                 'optimizer' : optimizer.state_dict(),}
         
         if is_best:
@@ -253,12 +295,8 @@ def run(args, trainset, testset, action):
             save_checkpoint(model.state_dict(), args.outfile, 'model_best')
             save_checkpoint(model.features.state_dict(), args.outfile, 'feat_best')
             print(f"[Save] Best model saved")
+            best_epoch = epoch + 1
 
-        # Clear cache after each epoch
-        if str(args.device) != 'cpu':
-            torch.cuda.empty_cache()
-            gc.collect()
-        
         # Display estimated remaining time
         elapsed = time.time() - total_start_time
         estimated_total = elapsed / (epoch + 1 - args.start_epoch) * (args.epochs - args.start_epoch)
@@ -280,21 +318,121 @@ class Action:
         self.num_classes = num_classes
         self.dim_k = args.dim_k
         self.use_tnet = args.use_tnet
+        # 添加新的属性
+        self.model_type = args.model_type
+        self.num_attention_blocks = args.num_attention_blocks
+        self.num_heads = args.num_heads
+        # 添加Mamba3D属性
+        self.num_mamba_blocks = args.num_mamba_blocks
+        self.d_state = args.d_state
+        self.expand = args.expand
+        
+        # 添加快速点注意力属性
+        self.num_fast_attention_blocks = args.num_fast_attention_blocks
+        self.fast_attention_scale = args.fast_attention_scale
+        
+        # 添加Cformer属性
+        self.num_proxy_points = getattr(args, 'num_proxy_points', 8)
+        self.num_blocks = getattr(args, 'num_blocks', 2)
+        
         self.sym_fn = None
-        if args.symfn == 'max':
-            self.sym_fn = ptlk.pointnet.symfn_max
-        elif args.symfn == 'avg':
-            self.sym_fn = ptlk.pointnet.symfn_avg
+        if args.model_type == 'attention':
+            # 为attention模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = attention_v1.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = attention_v1.symfn_avg
+            else:
+                self.sym_fn = attention_v1.symfn_attention_pool  # attention特有的聚合
+        elif args.model_type == 'mamba3d':
+            # 为Mamba3D模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = mamba3d_v1.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = mamba3d_v1.symfn_avg
+            elif args.symfn == 'selective':
+                self.sym_fn = mamba3d_v1.symfn_selective
+            else:
+                self.sym_fn = mamba3d_v1.symfn_max  # 默认使用最大池化
+        elif args.model_type == 'fast_attention':
+            # 为快速点注意力模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = fast_point_attention.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = fast_point_attention.symfn_avg
+            elif args.symfn == 'selective':
+                self.sym_fn = fast_point_attention.symfn_fast_attention_pool  # 快速注意力特有的聚合
+            else:
+                self.sym_fn = fast_point_attention.symfn_max  # 默认使用最大池化
+        elif args.model_type == 'cformer':
+            # 为Cformer模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = cformer.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = cformer.symfn_avg
+            elif args.symfn == 'cd_pool':
+                self.sym_fn = cformer.symfn_cd_pool
+            else:
+                self.sym_fn = cformer.symfn_max  # 默认使用最大池化
+        else:
+            # 为pointnet模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = ptlk.pointnet.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = ptlk.pointnet.symfn_avg
 
     def create_model(self):
-        feat = ptlk.pointnet.PointNet_features(self.dim_k, self.use_tnet, self.sym_fn)
-        return ptlk.pointnet.PointNet_classifier(self.num_classes, feat, self.dim_k)
+        if self.model_type == 'attention':
+            # 创建attention模型
+            feat = attention_v1.AttentionNet_features(
+                dim_k=self.dim_k, 
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_attention_blocks=self.num_attention_blocks,
+                num_heads=self.num_heads
+            )
+            return attention_v1.AttentionNet_classifier(self.num_classes, feat, self.dim_k)
+        elif self.model_type == 'mamba3d':
+            # 创建Mamba3D模型
+            feat = mamba3d_v1.Mamba3D_features(
+                dim_k=self.dim_k,
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            return mamba3d_v1.Mamba3D_classifier(self.num_classes, feat, self.dim_k)
+        elif self.model_type == 'fast_attention':
+            # 创建快速点注意力模型
+            feat = fast_point_attention.FastPointAttention_features(
+                dim_k=self.dim_k,
+                sym_fn=self.sym_fn,
+                scale=self.fast_attention_scale,
+                num_attention_blocks=self.num_fast_attention_blocks
+            )
+            return fast_point_attention.FastPointAttention_classifier(self.num_classes, feat, self.dim_k)
+        elif self.model_type == 'cformer':
+            # 创建Cformer模型
+            feat = cformer.CFormer_features(
+                dim_k=self.dim_k,
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_proxy_points=self.num_proxy_points,
+                num_blocks=self.num_blocks
+            )
+            return cformer.CFormer_classifier(self.num_classes, feat, self.dim_k)
+        else:
+            # 创建原始pointnet模型
+            feat = ptlk.pointnet.PointNet_features(self.dim_k, self.sym_fn)
+            return ptlk.pointnet.PointNet_classifier(self.num_classes, feat, self.dim_k)
 
     def train_1(self, model, trainloader, optimizer, device):
         model.train()
         vloss = 0.0
         pred  = 0.0
-        count = 0
+        count = 0  # 用于计算准确率的样本数
+        batch_count = 0  # 用于计算平均loss的batch数
         nan_count = 0  # Count of NaN batches
         
         batch_times = []
@@ -348,6 +486,7 @@ class Action:
             backward_times.append(backward_time)
 
             vloss += loss.item()
+            batch_count += 1  # 增加batch计数
             count += output.size(0)
 
             _, pred1 = output.max(dim=1)
@@ -374,7 +513,8 @@ class Action:
         if nan_count > 0:
             print(f"Total of {nan_count} batches were skipped due to NaN loss ({nan_count/len(trainloader)*100:.2f}%)")
             
-        running_loss = float(vloss)/count if count > 0 else float('nan')
+        # 修改：使用batch_count计算平均loss
+        running_loss = float(vloss)/batch_count if batch_count > 0 else float('nan')
         accuracy = float(pred)/count if count > 0 else 0.0
         
         # Calculate average times
@@ -384,6 +524,7 @@ class Action:
         avg_backward = sum(backward_times) / len(backward_times) if backward_times else 0
         
         print(f"\nPerformance statistics:")
+        print(f"Valid batches: {batch_count}/{len(trainloader)} ({batch_count/len(trainloader)*100:.2f}%)")
         print(f"Average batch time: {avg_batch:.4f} sec = Data loading: {avg_data:.4f} sec + Forward pass: {avg_forward:.4f} sec + Backward pass: {avg_backward:.4f} sec")
         print(f"Training results: Loss={running_loss:.4f}, Accuracy={accuracy:.4f}")
         
@@ -393,7 +534,8 @@ class Action:
         model.eval()
         vloss = 0.0
         pred = 0.0
-        count = 0
+        count = 0  # 用于计算准确率的样本数
+        batch_count = 0  # 用于计算平均loss的batch数
         nan_count = 0  # Count of NaN batches
         
         # Add time tracking
@@ -430,6 +572,7 @@ class Action:
                         
                     loss_val = loss.item()
                     vloss += loss_val
+                    batch_count += 1  # 增加batch计数
                     count += output.size(0)
 
                     # Calculate accuracy
@@ -464,8 +607,8 @@ class Action:
         if nan_count > 0:
             print(f"Total of {nan_count} validation batches were skipped due to errors or non-finite loss ({nan_count/len(testloader)*100:.2f}%)")
             
-        # Safely calculate averages
-        ave_loss = float(vloss)/count if count > 0 else float('inf')
+        # 修改：使用batch_count计算平均loss
+        ave_loss = float(vloss)/batch_count if batch_count > 0 else float('inf')
         accuracy = float(pred)/count if count > 0 else 0.0
         
         # Calculate average times
@@ -474,14 +617,9 @@ class Action:
         avg_forward = sum(forward_times) / len(forward_times) if forward_times else 0
         
         print(f"\nValidation performance statistics:")
+        print(f"Valid batches: {batch_count}/{len(testloader)} ({batch_count/len(testloader)*100:.2f}%)")
         print(f"Average batch time: {avg_batch:.4f} sec = Data loading: {avg_data:.4f} sec + Forward pass: {avg_forward:.4f} sec")
         print(f"Validation results: Loss={ave_loss:.4f}, Accuracy={accuracy:.4f}")
-        
-        # Check if validation result is NaN
-        if not numpy.isfinite(ave_loss):
-            print(f"Warning: Validation loss is non-finite ({ave_loss}), which may indicate model stability issues")
-            # Can use a large finite value instead of NaN to continue training
-            ave_loss = 1e6
         
         return ave_loss, accuracy
 
@@ -520,39 +658,137 @@ def plyread(file_path):
     return torch.from_numpy(pc.astype(np.float32))
 
 class C3VDDatasetForClassification(torch.utils.data.Dataset):
-    """C3VD dataset for classification tasks"""
+    """C3VD数据集用于分类任务"""
     def __init__(self, dataset_path, transform=None, classinfo=None):
         self.transform = transform
         
-        # Use scene names as classes
+        # 添加调试信息
+        print(f"\n====== C3VDDatasetForClassification调试信息 ======")
+        print(f"数据集路径: {dataset_path}")
+        
+        # 确定源点云和目标点云目录
+        self.source_root = os.path.join(dataset_path, 'C3VD_ply_source')
+        self.target_root = os.path.join(dataset_path, 'visible_point_cloud_ply_depth')
+        
+        # 检查目录是否存在
+        print(f"源点云目录 {self.source_root} 存在: {os.path.exists(self.source_root)}")
+        print(f"目标点云目录 {self.target_root} 存在: {os.path.exists(self.target_root)}")
+        
+        # 如果目录不存在，打印当前目录内容
+        if not os.path.exists(self.source_root) or not os.path.exists(self.target_root):
+            print(f"数据集根目录内容: {os.listdir(dataset_path) if os.path.exists(dataset_path) else '无法访问'}")
+            
+        # 使用classinfo如果提供了，否则从文件夹名提取类别
         if classinfo is not None:
             self.classes, self.c_to_idx = classinfo
+            print(f"从classinfo加载类别: {self.classes}")
         else:
-            # Get scene names as classes
-            scenes = []
-            source_root = os.path.join(dataset_path, 'C3VD_ply_rot_scale_trans')
-            for scene_dir in glob.glob(os.path.join(source_root, "*")):
-                if os.path.isdir(scene_dir):
-                    scenes.append(os.path.basename(scene_dir))
+            # 获取场景并提取前缀作为类别
+            scene_prefixes = set()
+            scene_dirs = glob.glob(os.path.join(self.source_root, "*"))
+            print(f"找到场景目录数量: {len(scene_dirs)}")
             
-            scenes.sort()
-            self.classes = scenes
-            self.c_to_idx = {scenes[i]: i for i in range(len(scenes))}
+            for scene_dir in scene_dirs:
+                if os.path.isdir(scene_dir):
+                    scene_name = os.path.basename(scene_dir)
+                    # 提取第一个下划线前的部分作为类别
+                    prefix = scene_name.split('_')[0]
+                    scene_prefixes.add(prefix)
+                    print(f"场景: {scene_name}, 提取类别: {prefix}")
+            
+            # 排序并创建类别索引映射
+            self.classes = sorted(list(scene_prefixes))
+            self.c_to_idx = {self.classes[i]: i for i in range(len(self.classes))}
+            
+            print(f"从文件夹名称提取了 {len(self.classes)} 个类别: {self.classes}")
         
-        # Collect all point cloud files and their classes
+        # 收集点云文件和它们的类别
         self.points_files = []
         self.point_classes = []
+        self.scene_to_prefix = {}  # 映射场景名到类别前缀
+        self.pair_scenes = []  # 记录每个点云所属的场景，用于场景分割
         
-        # Process both source and target point clouds
-        for dir_name in ['C3VD_ply_rot_scale_trans', 'C3VD_ref']:
-            for scene in self.classes:
-                scene_path = os.path.join(dataset_path, dir_name, scene)
-                if os.path.isdir(scene_path):
-                    # Get all point clouds in the scene
-                    for ply_file in glob.glob(os.path.join(scene_path, "*.ply")):
-                        self.points_files.append(ply_file)
-                        self.point_classes.append(self.c_to_idx[scene])
-    
+        # 创建场景到前缀的映射
+        scene_dirs = glob.glob(os.path.join(self.source_root, "*"))
+        
+        for scene_dir in scene_dirs:
+            if os.path.isdir(scene_dir):
+                scene_name = os.path.basename(scene_dir)
+                prefix = scene_name.split('_')[0]
+                if prefix in self.c_to_idx:
+                    self.scene_to_prefix[scene_name] = prefix
+        
+        # 处理源点云
+        for scene in self.scene_to_prefix:
+            source_path = os.path.join(self.source_root, scene)
+            if os.path.isdir(source_path):
+                prefix = self.scene_to_prefix[scene]
+                # 获取场景中的所有源点云
+                source_files = glob.glob(os.path.join(source_path, "????_depth_pcd.ply"))
+                for ply_file in source_files:
+                    self.points_files.append(ply_file)
+                    self.point_classes.append(self.c_to_idx[prefix])
+                    self.pair_scenes.append(scene)  # 记录点云所属场景
+        
+        # 处理目标点云
+        for scene in self.scene_to_prefix:
+            target_path = os.path.join(self.target_root, scene)
+            if os.path.isdir(target_path):
+                prefix = self.scene_to_prefix[scene]
+                # 获取场景中的所有目标点云
+                target_files = glob.glob(os.path.join(target_path, "*.ply"))
+                
+                for ply_file in target_files:
+                    self.points_files.append(ply_file)
+                    self.point_classes.append(self.c_to_idx[prefix])
+                    self.pair_scenes.append(scene)  # 记录点云所属场景
+        
+        # 打印每个类别的样本数量
+        class_counts = {}
+        for class_idx in self.point_classes:
+            class_name = self.classes[class_idx]
+            if class_name not in class_counts:
+                class_counts[class_name] = 0
+            class_counts[class_name] += 1
+        
+        print("class_counts:")
+        for class_name, count in class_counts.items():
+            print(f"  - {class_name}: {count}")
+            
+        if len(self.points_files) == 0:
+            print(f"错误：没有找到有效的点云文件！请检查数据集路径和结构。")
+            print(f"源点云路径: {self.source_root}")
+            print(f"目标点云路径: {self.target_root}")
+            
+            # 尝试列出路径下的文件和目录
+            print("\n检查数据集目录结构:")
+            if os.path.exists(dataset_path):
+                print(f"数据集根目录 {dataset_path} 内容: {os.listdir(dataset_path)}")
+                
+                # 检查C3VD_ply_source目录
+                if os.path.exists(self.source_root):
+                    source_dirs = os.listdir(self.source_root)
+                    print(f"源点云目录 {self.source_root} 内容: {source_dirs}")
+                    # 如果有场景目录，检查第一个场景目录
+                    if source_dirs:
+                        first_scene = os.path.join(self.source_root, source_dirs[0])
+                        if os.path.isdir(first_scene):
+                            print(f"第一个场景目录 {first_scene} 内容: {os.listdir(first_scene)}")
+                
+                # 检查目标点云目录
+                if os.path.exists(self.target_root):
+                    target_dirs = os.listdir(self.target_root)
+                    print(f"目标点云目录 {self.target_root} 内容: {target_dirs}")
+                    # 如果有场景目录，检查第一个场景目录
+                    if target_dirs:
+                        first_scene = os.path.join(self.target_root, target_dirs[0])
+                        if os.path.isdir(first_scene):
+                            print(f"第一个场景目录 {first_scene} 内容: {os.listdir(first_scene)}")
+                            
+            # 检查类别文件
+            if classinfo is not None and hasattr(self, 'classes'):
+                print(f"\n类别信息: {self.classes}")
+ 
     def __len__(self):
         return len(self.points_files)
     
@@ -560,24 +796,105 @@ class C3VDDatasetForClassification(torch.utils.data.Dataset):
         ply_file = self.points_files[idx]
         class_idx = self.point_classes[idx]
         
-        # Read point cloud
+        # 读取点云
         points = plyread(ply_file)
         
-        # Apply transformation
+        # 应用变换
         if self.transform:
             points = self.transform(points)
         
         return points, class_idx
 
+    def get_scene_indices(self, scene_names):
+        """获取指定场景的样本索引"""
+        indices = []
+        for i, scene in enumerate(self.pair_scenes):
+            if scene in scene_names:
+                indices.append(i)
+        
+        return indices
+
+class C3VDClassifierDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, num_points=1024):
+        self.dataset = dataset
+        self.num_points = num_points
+        
+        # 使用来自transforms.py的标准变换类
+        self.resampler = ptlk.data.transforms.Resampler(num_points)
+        self.normalizer = ptlk.data.transforms.OnUnitCube()
+        
+        # 数据增强变换
+        self.rotator_z = ptlk.data.transforms.RandomRotatorZ()
+        self.jitter = ptlk.data.transforms.RandomJitter(scale=0.01, clip=0.05)
+        
+        # 保留原始数据集的属性
+        if hasattr(dataset, 'classes'):
+            self.classes = dataset.classes
+            self.c_to_idx = dataset.c_to_idx
+        elif hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'classes'):
+            # 如果是Subset对象，访问其底层dataset
+            self.classes = dataset.dataset.classes
+            self.c_to_idx = dataset.dataset.c_to_idx
+        else:
+            print("警告: 无法找到类别信息！")
+            self.classes = ["unknown"]
+            self.c_to_idx = {"unknown": 0}
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        # 获取原始点云和类别
+        points, class_idx = self.dataset[idx]
+        
+        # 检查点云有效性
+        if not torch.isfinite(points).all():
+            print(f"警告: 索引 {idx} 的点云包含无效值，尝试修复")
+            points = torch.nan_to_num(points, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # 重采样确保点云有相同数量的点
+        if points.shape[0] > self.num_points:
+            points = self.resampler(points)
+        
+        # 标准化到单位立方体
+        points = self.normalizer(points)
+        
+        # 应用数据增强
+        # 1. 应用Z轴旋转
+        points = self.rotator_z(points)
+        
+        # 2. 添加随机抖动
+        if torch.rand(1).item() > 0.5:  # 50%几率添加抖动
+            points = self.jitter(points)
+        
+        return points, class_idx
+
 def get_datasets(args):
+    # 检查数据集路径是否存在
+    if not os.path.exists(args.dataset_path):
+        print(f"错误: 数据集路径 {args.dataset_path} 不存在!")
+        # 尝试列出父目录内容
+        parent_dir = os.path.dirname(args.dataset_path)
+        if os.path.exists(parent_dir):
+            print(f"父目录 {parent_dir} 内容: {os.listdir(parent_dir)}")
+    else:
+        print(f"数据集路径存在，内容: {os.listdir(args.dataset_path)}")
+    
+    # 检查类别文件是否存在
+    if args.categoryfile and not os.path.exists(args.categoryfile):
+        print(f"错误: 类别文件 {args.categoryfile} 不存在!")
+    elif args.categoryfile:
+        print(f"类别文件存在，内容:")
+        with open(args.categoryfile, 'r') as f:
+            print(f.read())
 
     cinfo = None
     if args.categoryfile:
-        #categories = numpy.loadtxt(args.categoryfile, dtype=str, delimiter="\n").tolist()
         categories = [line.rstrip('\n') for line in open(args.categoryfile)]
         categories.sort()
         c_to_idx = {categories[i]: i for i in range(len(categories))}
         cinfo = (categories, c_to_idx)
+        print(f"加载的类别: {categories}")
 
     if args.dataset_type == 'modelnet':
         transform = torchvision.transforms.Compose([\
@@ -605,74 +922,63 @@ def get_datasets(args):
         trainset, testset = dataset.split(0.8)
 
     elif args.dataset_type == 'c3vd':
-        transform = torchvision.transforms.Compose([
-            ptlk.data.transforms.OnUnitCube(),
-            ptlk.data.transforms.Resampler(args.num_points),
-            ptlk.data.transforms.RandomRotatorZ(),
-            ptlk.data.transforms.RandomJitter()
-        ])
+        print("\n====== 正在创建C3VD数据集 ======")
+        # 创建C3VD分类数据集
+        c3vd_dataset = C3VDDatasetForClassification(
+            args.dataset_path,
+            transform=None,
+            classinfo=cinfo
+        )
         
-        # Create C3VD classification dataset
-        dataset = C3VDDatasetForClassification(args.dataset_path, transform=transform, classinfo=cinfo)
-        
-        # Depending on whether to use scene split, decide split method
-        if hasattr(args, 'scene_split') and args.scene_split:
-            # Split by scene
-            # Get all scene names
-            all_scenes = dataset.classes
-            print(f"Total scene count: {len(all_scenes)}")
-            
-            # Randomly select 4 scenes as validation set
-            random.seed(42)  # Fixed random seed for reproducibility
-            test_scenes = random.sample(all_scenes, 4)
-            train_scenes = [scene for scene in all_scenes if scene not in test_scenes]
-            
-            print(f"Training scenes ({len(train_scenes)} scenes): {train_scenes}")
-            print(f"Validation scenes ({len(test_scenes)} scenes): {test_scenes}")
-            
-            # Build indices by scene
-            train_indices = []
-            test_indices = []
-            
-            for idx, file_path in enumerate(dataset.points_files):
-                # Extract scene name
-                scene_name = None
-                for scene in all_scenes:
-                    if f"/{scene}/" in file_path:
-                        scene_name = scene
-                        break
-                
-                if scene_name in train_scenes:
-                    train_indices.append(idx)
-                elif scene_name in test_scenes:
-                    test_indices.append(idx)
-            
-            # Create subsets
-            trainset = torch.utils.data.Subset(dataset, train_indices)
-            testset = torch.utils.data.Subset(dataset, test_indices)
-            
-            print(f"Training sample count: {len(trainset)}, Validation sample count: {len(testset)}")
-            
-            # To maintain interface consistency, need to pass classes and c_to_idx attributes to split datasets
-            trainset.classes = dataset.classes
-            testset.classes = dataset.classes
-            trainset.c_to_idx = dataset.c_to_idx
-            testset.c_to_idx = dataset.c_to_idx
+        # 检查数据集是否为空
+        if hasattr(c3vd_dataset, 'points_files'):
+            print(f"数据集点云文件数量: {len(c3vd_dataset.points_files)}")
+            if len(c3vd_dataset.points_files) == 0:
+                print("警告: 数据集中没有点云文件!")
         else:
-            # Original random split method
-            dataset_size = len(dataset)
-            train_size = int(dataset_size * 0.8)
-            test_size = dataset_size - train_size
-            trainset, testset = torch.utils.data.random_split(dataset, [train_size, test_size])
+            print("警告: 数据集没有points_files属性!")
+        
+        # 随机分割
+        print("\n====== random_split ======")
+        indices = list(range(len(c3vd_dataset)))
+        print(f"total number: {len(indices)}")
+        
+        if len(indices) == 0:
+            raise ValueError("数据集为空！请检查数据集路径和配置。")
             
-            # To maintain interface consistency, need to pass classes and c_to_idx attributes to split datasets
-            trainset.classes = dataset.classes
-            testset.classes = dataset.classes
-            trainset.c_to_idx = dataset.c_to_idx
-            testset.c_to_idx = dataset.c_to_idx
+        split = int(numpy.floor(0.2 * len(c3vd_dataset)))
+        numpy.random.seed(42)
+        numpy.random.shuffle(indices)
+        train_indices, test_indices = indices[split:], indices[:split]
+        
+        
+        try:
+            # 创建子集
+            train_subset = torch.utils.data.Subset(c3vd_dataset, train_indices)
+            test_subset = torch.utils.data.Subset(c3vd_dataset, test_indices)
             
-            print(f"Random split: Training sample count: {len(trainset)}, Validation sample count: {len(testset)}")
-
+            # 创建用于分类的数据集
+            trainset = C3VDClassifierDataset(
+                dataset=train_subset,
+                num_points=args.num_points
+            )
+            
+            testset = C3VDClassifierDataset(
+                dataset=test_subset,
+                num_points=args.num_points
+            )
+        except Exception as e:
+            print(f"创建数据集时出错: {str(e)}")
+            raise
+    
+    # 添加安全检查
+    if len(trainset) == 0:
+        raise ValueError("最终训练集为空！请检查数据处理逻辑。")
+    if len(testset) == 0:
+        raise ValueError("最终测试集为空！请检查数据处理逻辑。")
+        
+    print(f"train size: {len(trainset)}, test size: {len(testset)}")
+    
     return trainset, testset
 
 

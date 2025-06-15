@@ -62,40 +62,9 @@ def symfn_avg(x):
     #a = torch.sum(x, dim=-1, keepdim=True) / x.size(-1)
     return a
 
-class TNet(torch.nn.Module):
-    """ [B, K, N] -> [B, K, K]
-    """
-    def __init__(self, K):
-        super().__init__()
-        # [B, K, N] -> [B, K*K]
-        self.mlp1 = torch.nn.Sequential(*mlp_layers(K, [64, 128, 1024], b_shared=True))
-        self.mlp2 = torch.nn.Sequential(*mlp_layers(1024, [512, 256], b_shared=False))
-        self.lin = torch.nn.Linear(256, K*K)
-
-        for param in self.mlp1.parameters():
-            torch.nn.init.constant_(param, 0.0)
-        for param in self.mlp2.parameters():
-            torch.nn.init.constant_(param, 0.0)
-        for param in self.lin.parameters():
-            torch.nn.init.constant_(param, 0.0)
-
-    def forward(self, inp):
-        K = inp.size(1)
-        N = inp.size(2)
-        eye = torch.eye(K).unsqueeze(0).to(inp) # [1, K, K]
-
-        x = self.mlp1(inp)
-        x = flatten(torch.nn.functional.max_pool1d(x, N))
-        x = self.mlp2(x)
-        x = self.lin(x)
-
-        x = x.view(-1, K, K)
-        x = x + eye
-        return x
-
 
 class PointNet_features(torch.nn.Module):
-    def __init__(self, dim_k=1024, use_tnet=False, sym_fn=symfn_max, scale=1):
+    def __init__(self, dim_k=1024, sym_fn=symfn_max, scale=1):
         super().__init__()
         mlp_h1 = [int(64/scale), int(64/scale)]
         mlp_h2 = [int(64/scale), int(128/scale), int(dim_k/scale)]
@@ -105,9 +74,6 @@ class PointNet_features(torch.nn.Module):
         #self.sy = torch.nn.Sequential(torch.nn.MaxPool1d(num_points), Flatten())
         self.sy = sym_fn
 
-        self.tnet1 = TNet(3) if use_tnet else None
-        self.tnet2 = TNet(mlp_h1[-1]) if use_tnet else None
-
         self.t_out_t2 = None
         self.t_out_h1 = None
 
@@ -116,15 +82,7 @@ class PointNet_features(torch.nn.Module):
             [B, N, 3] -> [B, K]
         """
         x = points.transpose(1, 2) # [B, 3, N]
-        if self.tnet1:
-            t1 = self.tnet1(x)
-            x = t1.bmm(x)
-
         x = self.h1(x)
-        if self.tnet2:
-            t2 = self.tnet2(x)
-            self.t_out_t2 = t2
-            x = t2.bmm(x)
         self.t_out_h1 = x # local features
 
         x = self.h2(x)

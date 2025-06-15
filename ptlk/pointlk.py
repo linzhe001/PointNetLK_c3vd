@@ -4,8 +4,13 @@
 
 import numpy
 import torch
+import time
+import traceback
 
 from . import pointnet
+from . import attention_v1
+from . import mamba3d_v1
+from . import fast_point_attention
 from . import se3, so3, invmat
 
 
@@ -92,6 +97,7 @@ class PointLK(torch.nn.Module):
 
     def forward(self, p0, p1, maxiter=10, xtol=1.0e-7):
         g0 = torch.eye(4).to(p0).view(1, 4, 4).expand(p0.size(0), 4, 4).contiguous()
+        
         r, g, itr = self.iclk(g0, p0, p1, maxiter, xtol)
 
         self.g = g
@@ -101,7 +107,8 @@ class PointLK(torch.nn.Module):
     def update(self, g, dx):
         # [B, 4, 4] x [B, 6] -> [B, 4, 4]
         dg = self.exp(dx)
-        return dg.matmul(g)
+        result = dg.matmul(g)
+        return result
 
     def approx_Jic(self, p0, f0, dt):
         # p0: [B, N, 3], Variable
@@ -123,6 +130,7 @@ class PointLK(torch.nn.Module):
 
         #f0 = self.ptnet(p0).unsqueeze(-1) # [B, K, 1]
         f0 = f0.unsqueeze(-1) # [B, K, 1]
+        
         f = self.ptnet(p.view(-1, num_points, 3)).view(batch_size, 6, -1).transpose(1, 2) # [B, K, 6]
 
         df = f0 - f # [B, K, 6]
@@ -149,7 +157,10 @@ class PointLK(torch.nn.Module):
 
         # approx. J by finite difference
         dt = self.dt.to(p0).expand(batch_size, 6)
-        J = self.approx_Jic(p0, f0, dt)
+        try:
+            J = self.approx_Jic(p0, f0, dt)
+        except Exception as e:
+            return None, g0, -1
 
         self.last_err = None
         itr = -1
@@ -159,10 +170,10 @@ class PointLK(torch.nn.Module):
             H = Jt.bmm(J) # [B, 6, 6]
             B = self.inverse(H)
             pinv = B.bmm(Jt) # [B, 6, K]
+            
         except RuntimeError as err:
             # singular...?
             self.last_err = err
-            #print(err)
             # Perhaps we can use MP-inverse, but,...
             # probably, self.dt is way too small...
             f1 = self.ptnet(p1) # [B, N, 3] -> [B, K]
@@ -175,7 +186,9 @@ class PointLK(torch.nn.Module):
         for itr in range(maxiter):
             self.prev_r = r
             p = self.transform(g.unsqueeze(1), p1) # [B, 1, 4, 4] x [B, N, 3] -> [B, N, 3]
+            
             f = self.ptnet(p) # [B, N, 3] -> [B, K]
+            
             r = f - f0
 
             dx = -pinv.bmm(r.unsqueeze(-1)).view(batch_size, 6)
@@ -185,6 +198,7 @@ class PointLK(torch.nn.Module):
             #print('itr,{},|r|,{}'.format(itr+1, ','.join(map(str, norm_r.data.tolist()))))
 
             check = dx.norm(p=2, dim=1, keepdim=True).max()
+            
             if float(check) < xtol:
                 if itr == 0:
                     self.last_err = 0 # no update.

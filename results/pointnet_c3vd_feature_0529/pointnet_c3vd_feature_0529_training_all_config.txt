@@ -1,0 +1,9 @@
+数据集路径: /mnt/f/Datasets/C3VD_sever_datasets
+类别文件: /home/linzhe/PointNetLK_c3vd/experiments/sampledata/c3vd.txt
+点云数量: 1024
+批次大小: 16
+设备: cuda:0
+配对模式: all
+雅可比矩阵计算方法: feature
+训练日期: Thu May 29 04:00:38 BST 2025
+数据增强说明: 包含一对一配对、源点云到源点云配对和目标点云到目标点云配对
