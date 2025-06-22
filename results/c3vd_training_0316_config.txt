@@ -1,5 +1,0 @@
-数据集路径: /mnt/c/Users/asus/Downloads/C3VD_datasets
-类别文件: experiments/sampledata/c3vd.txt
-点云数量: 1024
-设备: cuda:0
-训练日期: Sun Mar 16 00:32:28 GMT 2025

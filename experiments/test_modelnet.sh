@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 #$ -l tmem=32G
 #$ -l h_vmem=32G            
-#$ -l h_rt=3600  # 1 hour test time
+#$ -l h_rt=3600  # 1小时测试时间
 #$ -l gpu=true
 #$ -l gpu_type=a6000
 #$ -pe gpu 1
@@ -11,367 +11,403 @@
 #$ -wd /SAN/medic/MRpcr
 
 cd /SAN/medic/MRpcr/PointNetLK_c3vd/experiments
-# Set working directory
-echo "Current working directory: $(pwd)"
+# 设置工作目录
+echo "当前工作目录: $(pwd)"
 
-# Activate Conda environment
-echo "Activating Conda environment..."
+# 激活Conda环境
+echo "激活Conda环境..."
 source /SAN/medic/MRpcr/miniconda3/etc/profile.d/conda.sh
 conda activate pointlk
 
-# Create results and log directories
+# 创建结果和日志目录
 mkdir -p /SAN/medic/MRpcr/results/pointnet_modelnet/test_results
+mkdir -p /SAN/medic/MRpcr/results/pointnet_modelnet/test_results/gt
 
-# Python command
+# Python命令
 PY3="nice -n 10 python"
 
-# Set variables
+# 设置变量
 DATASET_PATH="/SAN/medic/MRpcr/ModelNet40"
 CATEGORY_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/experiments/sampledata/modelnet40_half2.txt"
 NUM_POINTS=1024
 DEVICE="cuda:0"
 DATE_TAG=$(date +"%m%d")
 
-# PointNet model configuration (keep consistent with training)
-DIM_K=1024                    # Feature dimension
-SYMFN="max"                   # Aggregation function: max or avg
-MAX_ITER=20                   # LK maximum iterations
-DELTA=1.0e-2                  # LK step size
+# PointNet模型配置（与训练保持一致）
+DIM_K=1024                    # 特征维度
+SYMFN="max"                   # 聚合函数：max或avg
+MAX_ITER=20                   # LK最大迭代次数
+DELTA=1.0e-2                  # LK步长
 
-# Maximum test samples
-MAX_SAMPLES=1000
+# 最大测试样本数
+MAX_SAMPLES_ROUND1=1000  # 第一轮测试：角度扰动文件的最大样本数
+MAX_SAMPLES_ROUND2=0 # 第二轮测试：精度测试文件的最大样本数
 
-# Visualization settings (optional)
-VISUALIZE_PERT="" # If visualization needed, set to "--visualize-pert pert_010.csv pert_020.csv"
+# 可视化设置（可选）
+VISUALIZE_PERT="" # 如需可视化，设置为 "--visualize-pert pert_010.csv pert_020.csv"
 VISUALIZE_SAMPLES=3
 
-# Model path - using specified trained model weights
+# 模型路径 - 使用指定的训练好的模型权重
 POINTNET_MODEL="/SAN/medic/MRpcr/results/modelnet/modelnet_pointlk_0603_model_best.pth"
 CLASSIFIER_MODEL="/SAN/medic/MRpcr/results/modelnet/modelnet_classifier_0603_model_best.pth"
 
-# Print model information
-echo "🎯 Using specified model weights:"
-echo "   - Registration model: ${POINTNET_MODEL}"
-echo "   - Classifier model: ${CLASSIFIER_MODEL}"
-
-# Perturbation file directory
+# 扰动文件配置
 PERTURBATION_DIR="/SAN/medic/MRpcr/PointNetLK_c3vd/gt"
+GT_POSES_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/gt_poses.csv"
 
-# Test results output directory
+# 测试结果输出目录
 TEST_RESULTS_DIR="/SAN/medic/MRpcr/results/pointnet_modelnet/test_results"
-# Base name for output files - results will be stored in subdirectories based on angle
-TEST_OUTPUT_PREFIX="${TEST_RESULTS_DIR}/results"
 TEST_LOG="${TEST_RESULTS_DIR}/test_log_${DATE_TAG}.log"
 
-# Print configuration information
-echo "========== PointNet Registration Model Test Configuration =========="
-echo "🧠 Model type: PointNet registration model"
-echo "📂 Dataset path: ${DATASET_PATH}"
-echo "📄 Category file: ${CATEGORY_FILE}"
-echo "🎲 Number of points: ${NUM_POINTS}"
-echo "🖥️  Device: ${DEVICE}"
-echo "📊 Maximum test samples: ${MAX_SAMPLES}"
+# 打印配置信息
+echo "========== PointNet配准模型测试配置 =========="
+echo "🧠 模型类型: PointNet配准模型"
+echo "📂 数据集路径: ${DATASET_PATH}"
+echo "📄 类别文件: ${CATEGORY_FILE}"
+echo "🎲 点云数量: ${NUM_POINTS}"
+echo "🖥️  设备: ${DEVICE}"
+echo "📊 第一轮最大测试样本: ${MAX_SAMPLES_ROUND1}"
+echo "📊 第二轮最大测试样本: ${MAX_SAMPLES_ROUND2}"
 echo ""
-echo "🔧 PointNet parameters:"
-echo "   - Feature dimension: ${DIM_K}"
-echo "   - Aggregation function: ${SYMFN}"
-echo "   - LK max iterations: ${MAX_ITER}"
-echo "   - LK step size: ${DELTA}"
+echo "🔧 PointNet参数:"
+echo "   - 特征维度: ${DIM_K}"
+echo "   - 聚合函数: ${SYMFN}"
+echo "   - LK最大迭代: ${MAX_ITER}"
+echo "   - LK步长: ${DELTA}"
 echo ""
-echo "📁 Model files:"
-echo "   - Registration model: ${POINTNET_MODEL}"
-echo "   - Classifier model: ${CLASSIFIER_MODEL}"
-echo "   - Perturbation directory: ${PERTURBATION_DIR}"
+echo "📁 模型文件:"
+echo "   - 配准模型: ${POINTNET_MODEL}"
+echo "   - 分类器模型: ${CLASSIFIER_MODEL}"
+echo "   - 扰动目录: ${PERTURBATION_DIR}"
+echo "   - GT姿态文件: ${GT_POSES_FILE}"
 echo ""
-echo "📁 Output paths:"
-echo "   - Test result prefix: ${TEST_OUTPUT_PREFIX}"
-echo "   - Test log: ${TEST_LOG}"
+echo "📁 输出路径:"
+echo "   - 测试结果目录: ${TEST_RESULTS_DIR}"
+echo "   - 测试日志: ${TEST_LOG}"
 
-# Check necessary files
+# 检查必要文件
 echo ""
-echo "========== File Check =========="
+echo "========== 文件检查 =========="
 
-# Check dataset
+# 检查数据集
 if [ -d "${DATASET_PATH}" ]; then
-    echo "✅ Dataset directory exists"
+    echo "✅ 数据集目录存在"
     CATEGORY_COUNT=$(find "${DATASET_PATH}" -maxdepth 1 -type d | wc -l)
-    echo "📊 Available categories: $((CATEGORY_COUNT - 1))"  # Subtract 1 for parent directory
+    echo "📊 可用类别数: $((CATEGORY_COUNT - 1))"  # 减去父目录
 else
-    echo "❌ Error: Dataset directory does not exist: ${DATASET_PATH}"
+    echo "❌ 错误: 数据集目录不存在: ${DATASET_PATH}"
     exit 1
 fi
 
-# Check category file
+# 检查类别文件
 if [ -f "${CATEGORY_FILE}" ]; then
-    echo "✅ Category file exists"
+    echo "✅ 类别文件存在"
     CATEGORY_COUNT=$(wc -l < "${CATEGORY_FILE}")
-    echo "📊 Test category count: ${CATEGORY_COUNT}"
+    echo "📊 测试类别数量: ${CATEGORY_COUNT}"
 else
-    echo "❌ Error: Category file does not exist: ${CATEGORY_FILE}"
+    echo "❌ 错误: 类别文件不存在: ${CATEGORY_FILE}"
     exit 1
 fi
 
-# Check model files
+# 检查模型文件
 if [ -f "${POINTNET_MODEL}" ]; then
-    echo "✅ PointNet registration model exists: ${POINTNET_MODEL}"
+    echo "✅ PointNet配准模型存在: ${POINTNET_MODEL}"
     MODEL_SIZE=$(du -h "${POINTNET_MODEL}" | cut -f1)
-    echo "📊 Model file size: ${MODEL_SIZE}"
+    echo "📊 模型文件大小: ${MODEL_SIZE}"
 else
-    echo "❌ Error: PointNet registration model does not exist: ${POINTNET_MODEL}"
-    echo "Please check if the specified model file exists"
+    echo "❌ 错误: PointNet配准模型不存在: ${POINTNET_MODEL}"
+    echo "请检查指定的模型文件是否存在"
     exit 1
 fi
 
 if [ -f "${CLASSIFIER_MODEL}" ]; then
-    echo "✅ Classifier model exists: ${CLASSIFIER_MODEL}"
+    echo "✅ 分类器模型存在: ${CLASSIFIER_MODEL}"
     CLASSIFIER_SIZE=$(du -h "${CLASSIFIER_MODEL}" | cut -f1)
-    echo "📊 Classifier file size: ${CLASSIFIER_SIZE}"
+    echo "📊 分类器文件大小: ${CLASSIFIER_SIZE}"
 else
-    echo "❌ Error: Classifier model does not exist: ${CLASSIFIER_MODEL}"
-    echo "Please check if the specified classifier model file exists"
+    echo "❌ 错误: 分类器模型不存在: ${CLASSIFIER_MODEL}"
+    echo "请检查指定的分类器模型文件是否存在"
     exit 1
 fi
 
-# Check perturbation directory
+# 检查扰动目录
 if [ -d "${PERTURBATION_DIR}" ]; then
     echo "✅ 扰动目录存在"
-    PERT_COUNT=$(find "${PERTURBATION_DIR}" -name "*.csv" | wc -l)
+    PERT_COUNT=$(find "${PERTURBATION_DIR}" -name "pert_*.csv" | wc -l)
     echo "📊 扰动文件数量: ${PERT_COUNT}"
     if [ ${PERT_COUNT} -eq 0 ]; then
-        echo "⚠️  警告: 扰动目录中没有.csv文件"
-        echo "将生成大角度扰动文件以进行有效测试..."
-        
-        # 生成大角度扰动文件 - 修复幅度设置
-        mkdir -p "${PERTURBATION_DIR}"
-        
-        # 使用更大的扰动幅度 (弧度制) - 从中等到大角度
-        PERTURBATION_MAGNITUDES=(0.52 0.79 1.05 1.31 1.57 1.83 2.09 2.36 2.62 2.88)
-        # 对应角度: 30° 45° 60° 75° 90° 105° 120° 135° 150° 165°
-        
-        echo "🎯 生成扰动文件，角度范围: 30°-165°"
-        
-        for mag in "${PERTURBATION_MAGNITUDES[@]}"; do
-            # 计算对应的角度(度)
-            angle_deg=$(python3 -c "import math; print(f'{math.degrees($mag):.0f}')")
-            PERT_FILE="${PERTURBATION_DIR}/pert_${angle_deg}.csv"
-            echo "   正在生成扰动文件: ${PERT_FILE} (幅度: ${mag} 弧度 ≈ ${angle_deg}°)"
-            
-            ${PY3} generate_perturbations.py \
-                -o ${PERT_FILE} \
-                -i ${DATASET_PATH} \
-                -c ${CATEGORY_FILE} \
-                --mag ${mag} \
-                --dataset-type modelnet
-            
-            if [ $? -ne 0 ]; then
-                echo "   ❌ 生成扰动文件失败: ${PERT_FILE}"
-                exit 1
-            fi
-        done
-        
-        echo "✅ 成功生成大角度扰动文件"
-        PERT_COUNT=$(find "${PERTURBATION_DIR}" -name "*.csv" | wc -l)
-        echo "📊 新扰动文件数量: ${PERT_COUNT}"
+        echo "⚠️  警告: 扰动目录中没有pert_*.csv文件"
     else
-        echo "📋 现有扰动文件列表:"
-        find "${PERTURBATION_DIR}" -name "*.csv" | head -10
-        if [ ${PERT_COUNT} -gt 10 ]; then
+        echo "📋 扰动文件列表:"
+        find "${PERTURBATION_DIR}" -name "pert_*.csv" | sort | head -5
+        if [ ${PERT_COUNT} -gt 5 ]; then
             echo "   ... (共${PERT_COUNT}个扰动文件)"
         fi
-        
-        # 检查现有扰动文件的角度范围
-        echo "🔍 正在分析现有扰动文件的角度分布..."
-        python3 -c "
-import pandas as pd
-import numpy as np
-import os
-import glob
-
-pert_dir = '${PERTURBATION_DIR}'
-pert_files = glob.glob(os.path.join(pert_dir, '*.csv'))
-
-print('扰动文件角度分析:')
-for pert_file in sorted(pert_files)[:5]:  # 只分析前5个文件
-    try:
-        data = pd.read_csv(pert_file, header=None)
-        if len(data.columns) >= 6:
-            # 前3列是旋转参数
-            rot_params = data.iloc[:, :3]
-            max_rotation = rot_params.abs().max().max()
-            max_angle_deg = max_rotation * 180 / np.pi
-            filename = os.path.basename(pert_file)
-            print(f'  {filename}: 最大旋转角度 {max_angle_deg:.1f}°')
-        else:
-            print(f'  {os.path.basename(pert_file)}: 格式错误')
-    except Exception as e:
-        print(f'  {os.path.basename(pert_file)}: 读取失败 - {str(e)}')
-"
     fi
 else
     echo "❌ 错误: 扰动目录不存在: ${PERTURBATION_DIR}"
-    echo "正在创建扰动目录并生成大角度扰动文件..."
-    mkdir -p "${PERTURBATION_DIR}"
-    
-    # 使用大角度扰动
-    PERTURBATION_MAGNITUDES=(0.52 0.79 1.05 1.31 1.57 1.83 2.09 2.36 2.62 2.88)
-    
-    for mag in "${PERTURBATION_MAGNITUDES[@]}"; do
-        angle_deg=$(python3 -c "import math; print(f'{math.degrees($mag):.0f}')")
-        PERT_FILE="${PERTURBATION_DIR}/pert_${angle_deg}.csv"
-        echo "   正在生成扰动文件: ${PERT_FILE} (${angle_deg}°)"
-        
-        ${PY3} generate_perturbations.py \
-            -o ${PERT_FILE} \
-            -i ${DATASET_PATH} \
-            -c ${CATEGORY_FILE} \
-            --mag ${mag} \
-            --dataset-type modelnet
-        
-        if [ $? -ne 0 ]; then
-            echo "   ❌ 生成扰动文件失败: ${PERT_FILE}"
-            exit 1
-        fi
-    done
-    
-    echo "✅ 成功创建扰动目录并生成大角度扰动文件"
+    exit 1
 fi
 
-# GPU memory check
+# 检查GT姿态文件
+if [ -f "${GT_POSES_FILE}" ]; then
+    echo "✅ GT姿态文件存在: ${GT_POSES_FILE}"
+    GT_FILE_SIZE=$(du -h "${GT_POSES_FILE}" | cut -f1)
+    GT_FILE_LINES=$(wc -l < "${GT_POSES_FILE}")
+    echo "📊 GT姿态文件大小: ${GT_FILE_SIZE}"
+    echo "📊 GT姿态条目数量: ${GT_FILE_LINES}"
+else
+    echo "❌ 错误: GT姿态文件不存在: ${GT_POSES_FILE}"
+    echo "请确保已准备好GT姿态文件"
+    exit 1
+fi
+
+# GPU内存检查
 echo ""
-echo "========== GPU Status Check =========="
+echo "========== GPU状态检查 =========="
 if command -v nvidia-smi &> /dev/null; then
-    echo "🖥️  GPU information:"
+    echo "🖥️  GPU信息:"
     nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits
 else
-    echo "⚠️  Unable to get GPU information"
+    echo "⚠️  无法获取GPU信息"
 fi
 
 echo ""
-echo "========== Starting PointNet Registration Model Test =========="
-echo "🚀 About to start testing..."
-echo "⏱️  Estimated test time: ~30-60 minutes (depends on number of perturbation files and samples)"
+echo "========== 开始PointNet配准模型测试 =========="
+echo "🚀 即将开始两轮测试..."
+echo "⏱️  预计测试时间: ~30-60分钟（依据扰动文件数量和样本数量）"
 echo ""
 
-# Build visualization parameters
+# 构建可视化参数
 VISUALIZE_PARAMS=""
 if [ -n "${VISUALIZE_PERT}" ]; then
     VISUALIZE_PARAMS="${VISUALIZE_PERT} --visualize-samples ${VISUALIZE_SAMPLES}"
 fi
 
-# Run test
+# =============================================================================
+# 第一轮测试：处理gt文件夹中的扰动文件
+# =============================================================================
+# echo "========== 第一轮测试：角度扰动文件 =========="
+# echo "🎯 测试目标: 处理 gt 文件夹中的扰动文件"
+# echo "📂 扰动目录: ${PERTURBATION_DIR}"
+# echo "📁 结果存储: 各角度子目录"
+# echo ""
+
+# # 第一轮测试的输出前缀
+# TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
+
+# # 运行第一轮测试
+# echo "🚀 开始第一轮测试..."
+# ${PY3} test_pointlk.py \
+#   -o ${TEST_OUTPUT_PREFIX_ROUND1} \
+#   -i ${DATASET_PATH} \
+#   -c ${CATEGORY_FILE} \
+#   -l ${TEST_LOG} \
+#   --dataset-type modelnet \
+#   --num-points ${NUM_POINTS} \
+#   --max-iter ${MAX_ITER} \
+#   --delta ${DELTA} \
+#   --device ${DEVICE} \
+#   --max-samples ${MAX_SAMPLES_ROUND1} \
+#   --perturbation-dir ${PERTURBATION_DIR} \
+#   --model-type pointnet \
+#   --dim-k ${DIM_K} \
+#   --symfn ${SYMFN} \
+#   --pretrained ${POINTNET_MODEL} \
+#   --transfer-from ${CLASSIFIER_MODEL} \
+#   ${VISUALIZE_PARAMS}
+
+# # 检查第一轮测试结果
+# if [ $? -eq 0 ]; then
+#     echo ""
+#     echo "✅ 第一轮测试（角度扰动）完成!"
+    
+#     # 统计第一轮结果
+#     ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
+#     echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
+#     if [ ${ANGLE_DIRS} -gt 0 ]; then
+#         echo "📋 角度目录列表:"
+#         find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
+#         if [ ${ANGLE_DIRS} -gt 5 ]; then
+#             echo "   ... (共${ANGLE_DIRS}个角度目录)"
+#         fi
+#     fi
+# else
+#     echo ""
+#     echo "❌ 第一轮测试（角度扰动）失败!"
+#     echo "请检查错误日志: ${TEST_LOG}"
+    
+#     # 显示最后几行错误信息
+#     if [ -f "${TEST_LOG}" ]; then
+#         echo ""
+#         echo "📋 最新错误信息:"
+#         tail -10 "${TEST_LOG}"
+#     fi
+    
+#     exit 1
+# fi
+
+# =============================================================================
+# 第二轮测试：处理GT姿态文件
+# =============================================================================
+echo ""
+echo "========== 第二轮测试：GT姿态文件 =========="
+echo "🎯 测试目标: 处理GT姿态文件"
+echo "📄 GT文件: ${GT_POSES_FILE}"
+echo "📁 结果存储: gt 子目录"
+echo ""
+
+# 第二轮测试的输出前缀（指向gt子目录）
+TEST_OUTPUT_PREFIX_ROUND2="${TEST_RESULTS_DIR}/gt/results"
+TEST_LOG_ROUND2="${TEST_RESULTS_DIR}/gt/test_log_gt_${DATE_TAG}.log"
+
+echo "🚀 开始第二轮测试..."
+echo "📄 直接使用GT姿态文件: ${GT_POSES_FILE}"
+echo "🎯 GT_POSES模式将自动激活（每个扰动随机选择一个测试样本）"
+
+# 构建第二轮测试的MAX_SAMPLES参数
+MAX_SAMPLES_PARAM_ROUND2=""
+if [ ${MAX_SAMPLES_ROUND2} -gt 0 ]; then
+    MAX_SAMPLES_PARAM_ROUND2="--max-samples ${MAX_SAMPLES_ROUND2}"
+fi
+
+# 运行第二轮测试 - 直接使用GT姿态文件
 ${PY3} test_pointlk.py \
-  -o ${TEST_OUTPUT_PREFIX} \
+  -o ${TEST_OUTPUT_PREFIX_ROUND2} \
   -i ${DATASET_PATH} \
   -c ${CATEGORY_FILE} \
-  -l ${TEST_LOG} \
+  -l ${TEST_LOG_ROUND2} \
   --dataset-type modelnet \
   --num-points ${NUM_POINTS} \
   --max-iter ${MAX_ITER} \
   --delta ${DELTA} \
   --device ${DEVICE} \
-  --max-samples ${MAX_SAMPLES} \
-  --perturbation-dir ${PERTURBATION_DIR} \
+  ${MAX_SAMPLES_PARAM_ROUND2} \
+  --perturbation-file ${GT_POSES_FILE} \
   --model-type pointnet \
   --dim-k ${DIM_K} \
   --symfn ${SYMFN} \
   --pretrained ${POINTNET_MODEL} \
-  --transfer-from ${CLASSIFIER_MODEL} \
   ${VISUALIZE_PARAMS}
 
-# Check test results
+# 检查第二轮测试结果
 if [ $? -eq 0 ]; then
     echo ""
-    echo "🎉 PointNet registration model test completed!"
-    echo "📁 Test results saved to: ${TEST_RESULTS_DIR}"
-    echo "📋 Test log: ${TEST_LOG}"
+    echo "✅ 第二轮测试（GT姿态）完成!"
     
-    # Display generated result files - modified to show angle directories and log files
-    echo ""
-    echo "📊 Generated test result directories:"
-    find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | xargs ls -ld 2>/dev/null
-    
-    echo ""
-    echo "📊 Sample result files:"
-    # Find and display some result files from angle directories
-    find "${TEST_RESULTS_DIR}/angle_"* -name "*.log" -type f 2>/dev/null | sort | head -10 | xargs ls -lh 2>/dev/null
-    
-    # Statistics
-    echo ""
-    echo "📈 Test statistics:"
-    # Count all log files (both in angle directories and main directory)
-    RESULT_FILES=$(find "${TEST_RESULTS_DIR}" -name "*.log" -type f | wc -l)
-    echo "   - Total result file count: ${RESULT_FILES}"
-    
-    # Count angle directories
-    ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
-    echo "   - Angle directories: ${ANGLE_DIRS}"
-    
-    if [ ${RESULT_FILES} -gt 0 ]; then
-        # Display statistics from a sample result file
-        SAMPLE_FILE=$(find "${TEST_RESULTS_DIR}" -name "results_*.log" -type f | head -1)
-        if [ -f "${SAMPLE_FILE}" ]; then
-            echo "   - Sample result file: ${SAMPLE_FILE}"
-            echo "   - Result file statistics preview:"
-            # Display statistics section (final statistical results)
-            grep "# Average.*error:" "${SAMPLE_FILE}" | head -3
-        fi
+    # 统计第二轮结果
+    GT_RESULT_FILES=$(find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f | wc -l)
+    echo "📊 生成的GT结果文件数: ${GT_RESULT_FILES}"
+    if [ ${GT_RESULT_FILES} -gt 0 ]; then
+        echo "📋 GT结果文件列表:"
+        find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f | sort | head -5
     fi
-    
 else
     echo ""
-    echo "❌ PointNet registration model test failed!"
-    echo "Please check error log: ${TEST_LOG}"
+    echo "❌ 第二轮测试（GT姿态）失败!"
+    echo "请检查错误日志: ${TEST_LOG_ROUND2}"
     
-    # Display last few lines of error information
-    if [ -f "${TEST_LOG}" ]; then
+    # 显示最后几行错误信息
+    if [ -f "${TEST_LOG_ROUND2}" ]; then
         echo ""
-        echo "📋 Latest error information:"
-        tail -10 "${TEST_LOG}"
+        echo "📋 最新错误信息:"
+        tail -10 "${TEST_LOG_ROUND2}"
     fi
     
     exit 1
 fi
 
-# Save test configuration information
-CONFIG_FILE="${TEST_RESULTS_DIR}/pointnet_test_${DATE_TAG}_config.txt"
-echo "🧠 PointNet Registration Model Test Configuration" > ${CONFIG_FILE}
+echo ""
+echo "🎯 GT_POSES模式测试说明:"
+echo "   - 直接使用了gt_poses.csv文件"
+echo "   - 系统自动检测到文件名包含'gt_poses'，启用随机选择模式"
+echo "   - 每个扰动随机选择一个测试样本进行测试"
+echo "   - 总测试次数等于扰动数量（而不是数据集大小）"
+
+# =============================================================================
+# 最终结果汇总
+# =============================================================================
+echo ""
+echo "🎉 所有测试完成!"
+echo "📁 测试结果保存到: ${TEST_RESULTS_DIR}"
+echo "📋 主测试日志: ${TEST_LOG}"
+echo "📋 GT测试日志: ${TEST_LOG_ROUND2}"
+
+# 显示生成的结果文件汇总
+echo ""
+echo "📊 最终测试结果汇总:"
+
+# 统计角度目录（第一轮测试被注释掉，角度目录数为0）
+ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" 2>/dev/null | wc -l)
+echo "   - 角度测试目录数: ${ANGLE_DIRS}（第一轮测试已注释掉）"
+
+# 统计GT目录结果
+GT_RESULT_FILES=$(find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f 2>/dev/null | wc -l)
+echo "   - GT测试结果文件数: ${GT_RESULT_FILES}"
+
+# 统计总结果文件
+TOTAL_RESULT_FILES=$(find "${TEST_RESULTS_DIR}" -name "*.log" -type f | wc -l)
+echo "   - 总结果文件数量: ${TOTAL_RESULT_FILES}"
+
+echo ""
+echo "📂 结果目录结构:"
+echo "   ${TEST_RESULTS_DIR}/"
+echo "   ├── angle_*/ (第一轮：角度扰动测试 - 已注释掉)"
+echo "   ├── gt/       (第二轮：GT姿态测试)"
+echo "   ├── test_log_${DATE_TAG}.log (主测试日志 - 已注释掉)"
+echo "   └── gt/test_log_gt_${DATE_TAG}.log (GT测试日志)"
+
+# 保存测试配置信息
+CONFIG_FILE="${TEST_RESULTS_DIR}/pointnet_modelnet_test_${DATE_TAG}_config.txt"
+echo "🧠 PointNet配准模型双轮测试配置" > ${CONFIG_FILE}
 echo "=====================================" >> ${CONFIG_FILE}
-echo "Test completion time: $(date)" >> ${CONFIG_FILE}
+echo "测试完成时间: $(date)" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "🔧 Model configuration:" >> ${CONFIG_FILE}
-echo "Model type: PointNet registration model" >> ${CONFIG_FILE}
-echo "Feature dimension: ${DIM_K}" >> ${CONFIG_FILE}
-echo "Aggregation function: ${SYMFN}" >> ${CONFIG_FILE}
-echo "LK max iterations: ${MAX_ITER}" >> ${CONFIG_FILE}
-echo "LK step size: ${DELTA}" >> ${CONFIG_FILE}
+echo "🔧 测试轮次:" >> ${CONFIG_FILE}
+echo "第一轮: 角度扰动文件测试（gt 文件夹中的 pert_*.csv）" >> ${CONFIG_FILE}
+echo "第二轮: GT姿态文件测试（gt_poses.csv）" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "📊 Test configuration:" >> ${CONFIG_FILE}
-echo "Dataset path: ${DATASET_PATH}" >> ${CONFIG_FILE}
-echo "Category file: ${CATEGORY_FILE}" >> ${CONFIG_FILE}
-echo "Number of points: ${NUM_POINTS}" >> ${CONFIG_FILE}
-echo "Maximum test samples: ${MAX_SAMPLES}" >> ${CONFIG_FILE}
-echo "Device: ${DEVICE}" >> ${CONFIG_FILE}
-echo "Perturbation directory: ${PERTURBATION_DIR}" >> ${CONFIG_FILE}
+echo "🔧 模型配置:" >> ${CONFIG_FILE}
+echo "模型类型: PointNet配准模型" >> ${CONFIG_FILE}
+echo "特征维度: ${DIM_K}" >> ${CONFIG_FILE}
+echo "聚合函数: ${SYMFN}" >> ${CONFIG_FILE}
+echo "LK最大迭代: ${MAX_ITER}" >> ${CONFIG_FILE}
+echo "LK步长: ${DELTA}" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "📁 Model files:" >> ${CONFIG_FILE}
-echo "Registration model: ${POINTNET_MODEL}" >> ${CONFIG_FILE}
-echo "Classifier model: ${CLASSIFIER_MODEL}" >> ${CONFIG_FILE}
+echo "📊 测试配置:" >> ${CONFIG_FILE}
+echo "数据集路径: ${DATASET_PATH}" >> ${CONFIG_FILE}
+echo "类别文件: ${CATEGORY_FILE}" >> ${CONFIG_FILE}
+echo "点云数量: ${NUM_POINTS}" >> ${CONFIG_FILE}
+echo "第一轮最大测试样本: ${MAX_SAMPLES_ROUND1}" >> ${CONFIG_FILE}
+echo "第二轮最大测试样本: ${MAX_SAMPLES_ROUND2}" >> ${CONFIG_FILE}
+echo "设备: ${DEVICE}" >> ${CONFIG_FILE}
+echo "扰动目录（第一轮）: ${PERTURBATION_DIR}" >> ${CONFIG_FILE}
+echo "GT姿态文件（第二轮）: ${GT_POSES_FILE}" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "📁 Output files:" >> ${CONFIG_FILE}
-echo "Test result prefix: ${TEST_OUTPUT_PREFIX}" >> ${CONFIG_FILE}
-echo "Test log: ${TEST_LOG}" >> ${CONFIG_FILE}
+echo "📁 模型文件:" >> ${CONFIG_FILE}
+echo "配准模型: ${POINTNET_MODEL}" >> ${CONFIG_FILE}
+echo "分类器模型: ${CLASSIFIER_MODEL}" >> ${CONFIG_FILE}
+echo "" >> ${CONFIG_FILE}
+echo "📁 输出文件:" >> ${CONFIG_FILE}
+echo "第一轮测试结果: ${TEST_OUTPUT_PREFIX_ROUND1}" >> ${CONFIG_FILE}
+echo "第二轮测试结果: ${TEST_OUTPUT_PREFIX_ROUND2}" >> ${CONFIG_FILE}
+echo "主测试日志: ${TEST_LOG}" >> ${CONFIG_FILE}
+echo "GT测试日志: ${TEST_LOG_ROUND2}" >> ${CONFIG_FILE}
 
 echo ""
-echo "💾 Test configuration information saved to: ${CONFIG_FILE}"
+echo "💾 测试配置信息已保存到: ${CONFIG_FILE}"
 
 echo ""
-echo "🎯 Test completion summary:"
-echo "📂 Result directory: ${TEST_RESULTS_DIR}"
-echo "📄 Configuration file: ${CONFIG_FILE}"
-echo "🎯 Registration model: ${POINTNET_MODEL}"
-echo "🎯 Classifier model: ${CLASSIFIER_MODEL}"
-echo "📋 Test log: ${TEST_LOG}"
-echo "⏰ Completion time: $(date)"
+echo "🎯 测试完成总结:"
+echo "📂 结果目录: ${TEST_RESULTS_DIR}"
+echo "📄 配置文件: ${CONFIG_FILE}"
+echo "🎯 配准模型: ${POINTNET_MODEL}"
+echo "🎯 分类器模型: ${CLASSIFIER_MODEL}"
+echo "📋 第一轮（角度）日志: ${TEST_LOG}"
+echo "📋 第二轮（GT）日志: ${TEST_LOG_ROUND2}"
+echo "⏰ 完成时间: $(date)"
 
 echo ""
-echo "🎉🎉🎉 PointNet registration model test all completed! 🎉🎉🎉"
+echo "🎉🎉🎉 PointNet配准模型双轮测试全部完成! 🎉🎉🎉" 
+echo "📊 第一轮：角度扰动测试（存储在angle_*目录中）"
+echo "📊 第二轮：GT姿态测试（存储在gt目录中）"

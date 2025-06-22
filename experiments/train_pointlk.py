@@ -140,6 +140,22 @@ def options(argv=None):
     parser.add_argument('--scene-split', action='store_true',
                         help='Split train and validation sets by scene')
     
+    # 体素化相关参数
+    parser.add_argument('--use-voxelization', action='store_true', default=True,
+                        help='启用体素化预处理方法 (默认: True)')
+    parser.add_argument('--no-voxelization', dest='use_voxelization', action='store_false',
+                        help='禁用体素化，使用简单重采样方法')
+    parser.add_argument('--voxel-size', default=0.05, type=float,
+                        metavar='SIZE', help='体素大小 (默认: 0.05)')
+    parser.add_argument('--voxel-grid-size', default=32, type=int,
+                        metavar='SIZE', help='体素网格尺寸 (默认: 32)')
+    parser.add_argument('--max-voxel-points', default=100, type=int,
+                        metavar='N', help='每个体素最大点数 (默认: 100)')
+    parser.add_argument('--max-voxels', default=20000, type=int,
+                        metavar='N', help='最大体素数量 (默认: 20000)')
+    parser.add_argument('--min-voxel-points-ratio', default=0.1, type=float,
+                        metavar='RATIO', help='最小体素点数比例阈值 (默认: 0.1)')
+    
     # 添加学习率调度参数 (与train_classifier.py保持一致)
     parser.add_argument('--base-lr', default=None, type=float,
                         help='基础学习率，自动设置为优化器初始学习率')
@@ -1094,6 +1110,22 @@ def get_datasets(args):
             ptlk.data.transforms.Resampler(args.num_points),
         ])
         
+        # 配置体素化参数
+        use_voxelization = getattr(args, 'use_voxelization', True)
+        voxel_config = None
+        if use_voxelization:
+            # 创建体素化配置
+            voxel_config = ptlk.data.datasets.VoxelizationConfig(
+                voxel_size=getattr(args, 'voxel_size', 0.05),
+                voxel_grid_size=getattr(args, 'voxel_grid_size', 32),
+                max_voxel_points=getattr(args, 'max_voxel_points', 100),
+                max_voxels=getattr(args, 'max_voxels', 20000),
+                min_voxel_points_ratio=getattr(args, 'min_voxel_points_ratio', 0.1)
+            )
+            print(f"体素化配置: 体素大小={voxel_config.voxel_size}, 网格尺寸={voxel_config.voxel_grid_size}")
+        else:
+            print("使用简单重采样方法")
+        
         # Create C3VD dataset
         c3vd_dataset = ptlk.data.datasets.C3VDDataset(
             source_root=os.path.join(args.dataset_path, 'C3VD_ply_source'),
@@ -1150,12 +1182,22 @@ def get_datasets(args):
             traindata, testdata = torch.utils.data.random_split(c3vd_dataset, [train_size, test_size])
             print(f"Random split: Training samples: {len(traindata)}, Validation samples: {len(testdata)}")
         
-        # Create tracking datasets for training and testing
+        # Create tracking datasets for training and testing with voxelization support
         mag_randomly = True
         trainset = ptlk.data.datasets.C3VDset4tracking(
-            traindata, ptlk.data.transforms.RandomTransformSE3(args.mag, mag_randomly))
+            traindata, 
+            ptlk.data.transforms.RandomTransformSE3(args.mag, mag_randomly),
+            num_points=args.num_points,
+            use_voxelization=use_voxelization,
+            voxel_config=voxel_config
+        )
         testset = ptlk.data.datasets.C3VDset4tracking(
-            testdata, ptlk.data.transforms.RandomTransformSE3(args.mag, mag_randomly))
+            testdata, 
+            ptlk.data.transforms.RandomTransformSE3(args.mag, mag_randomly),
+            num_points=args.num_points,
+            use_voxelization=use_voxelization,
+            voxel_config=voxel_config
+        )
     
     return trainset, testset
 

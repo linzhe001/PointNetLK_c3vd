@@ -131,16 +131,33 @@ def options(argv=None):
     parser.add_argument('--visualize-samples', default=1, type=int,
                         help='Number of samples to visualize per perturbation file (default: 1)')
                         
-    # 新增 - 联合归一化设置
-    # New - joint normalization settings
-    parser.add_argument('--use-joint-normalization', action='store_true',
-                        help='Use joint bounding box to normalize paired point clouds, maintaining relative spatial relationships')
 
+    # 体素化相关参数（参考train_pointlk.py）
+    # Voxelization related parameters (reference train_pointlk.py)
+    parser.add_argument('--use-voxelization', action='store_true', default=True,
+                        help='启用体素化预处理方法 (默认: True)')
+    parser.add_argument('--no-voxelization', dest='use_voxelization', action='store_false',
+                        help='禁用体素化，使用简单重采样方法')
+    parser.add_argument('--voxel-size', default=0.05, type=float,
+                        metavar='SIZE', help='体素大小 (默认: 0.05)')
+    parser.add_argument('--voxel-grid-size', default=32, type=int,
+                        metavar='SIZE', help='体素网格尺寸 (默认: 32)')
+    parser.add_argument('--max-voxel-points', default=100, type=int,
+                        metavar='N', help='每个体素最大点数 (默认: 100)')
+    parser.add_argument('--max-voxels', default=20000, type=int,
+                        metavar='N', help='最大体素数量 (默认: 20000)')
+    parser.add_argument('--min-voxel-points-ratio', default=0.1, type=float,
+                        metavar='RATIO', help='最小体素点数比例阈值 (默认: 0.1)')
 
     # 1. 在options函数中添加新参数，用于接收扰动文件夹
     # 1. Add new parameter in options function to receive perturbation directory
     parser.add_argument('--perturbation-dir', default=None, type=str,
                         metavar='PATH', help='Perturbation directory path, will process all perturbation files in the directory')
+                        
+    # 添加单个扰动文件参数支持 (与脚本兼容)
+    # Add single perturbation file parameter support (compatible with scripts)
+    parser.add_argument('--perturbation-file', default=None, type=str,
+                        metavar='PATH', help='Single perturbation file path (e.g., gt_poses.csv)')
 
     args = parser.parse_args(argv)
     return args
@@ -161,17 +178,24 @@ def main(args):
                 perturbation_files.append(full_path)
                 print(f"Found perturbation file: {filename}")
     
-    # 如果还指定了单独的扰动文件，也添加进列表
-    # If individual perturbation file is also specified, add it to the list
+    # 如果指定了单独的扰动文件（通过--perturbations），也添加进列表
+    # If individual perturbation file is specified (via --perturbations), add it to the list
     if args.perturbations and os.path.exists(args.perturbations):
         if args.perturbations not in perturbation_files:
             perturbation_files.append(args.perturbations)
             print(f"Added individually specified perturbation file: {os.path.basename(args.perturbations)}")
     
+    # 如果指定了单独的扰动文件（通过--perturbation-file），也添加进列表
+    # If individual perturbation file is specified (via --perturbation-file), add it to the list
+    if args.perturbation_file and os.path.exists(args.perturbation_file):
+        if args.perturbation_file not in perturbation_files:
+            perturbation_files.append(args.perturbation_file)
+            print(f"Added perturbation file: {os.path.basename(args.perturbation_file)}")
+    
     # 检查是否有扰动文件要处理
     # Check if there are perturbation files to process
     if not perturbation_files:
-        print("Error: No perturbation files found. Please use --perturbation-dir to specify perturbation directory or use --perturbations to specify perturbation file.")
+        print("Error: No perturbation files found. Please use --perturbation-dir to specify perturbation directory, --perturbations to specify perturbation file, or --perturbation-file to specify perturbation file.")
         return
     
     print(f"Total found {len(perturbation_files)} perturbation files to process")
@@ -194,7 +218,7 @@ def main(args):
         
         # 判断是否为单个文件处理（如果只有一个文件且是直接提供的文件）
         # Determine if it's single file processing (if only one file and directly provided)
-        is_single_file = len(perturbation_files) == 1 and args.perturbations == pert_file
+        is_single_file = len(perturbation_files) == 1 and (args.perturbations == pert_file or args.perturbation_file == pert_file)
         
         # 提取扰动角度信息（如果有）
         # Extract perturbation angle information (if any)
@@ -772,8 +796,31 @@ class Action:
             if self.transfer_from and os.path.isfile(self.transfer_from):
                 try:
                     pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
-                    ptnet.load_state_dict(pretrained_dict)
-                    print(f"成功加载PointNet预训练权重: {self.transfer_from}")
+                    
+                    # 检查是否是分类器权重（包含 features. 前缀）
+                    # Check if it's classifier weights (contains features. prefix)
+                    if any(key.startswith('features.') for key in pretrained_dict.keys()):
+                        print(f"检测到分类器权重，提取特征提取器部分...")
+                        # 从分类器权重中提取特征提取器权重
+                        # Extract feature extractor weights from classifier weights
+                        feature_dict = {}
+                        for key, value in pretrained_dict.items():
+                            if key.startswith('features.'):
+                                # 移除 'features.' 前缀
+                                # Remove 'features.' prefix
+                                new_key = key[9:]  # 'features.' 有9个字符 # 'features.' has 9 characters
+                                feature_dict[new_key] = value
+                        
+                        # 加载提取的特征权重
+                        # Load extracted feature weights
+                        ptnet.load_state_dict(feature_dict)
+                        print(f"成功从分类器权重中提取并加载PointNet特征权重: {self.transfer_from}")
+                    else:
+                        # 直接加载特征提取器权重
+                        # Directly load feature extractor weights
+                        ptnet.load_state_dict(pretrained_dict)
+                        print(f"成功加载PointNet预训练权重: {self.transfer_from}")
+                        
                 except Exception as e:
                     print(f"加载PointNet预训练权重失败: {e}")
                     print("继续使用随机初始化权重")
@@ -1519,10 +1566,30 @@ def get_datasets(args):
 
     perturbations = None
     fmt_trans = False
+    # 检测是否为gt_poses.csv文件以启用随机选择模式
+    # Detect if it's gt_poses.csv file to enable random sampling mode
+    is_gt_poses_mode = False
     if args.perturbations:
         if not os.path.exists(args.perturbations):
             raise FileNotFoundError(f"{args.perturbations} not found.")
         perturbations = numpy.loadtxt(args.perturbations, delimiter=',')
+        
+        # 硬编码检测gt_poses.csv文件
+        # Hard-coded detection of gt_poses.csv file
+        perturbation_filename = os.path.basename(args.perturbations)
+        if perturbation_filename == 'gt_poses.csv' or 'gt_poses' in perturbation_filename:
+            is_gt_poses_mode = True
+            print(f"\n🎯 GT_POSES模式已激活！")
+            print(f"扰动文件: {args.perturbations}")
+            print(f"扰动数量: {len(perturbations)}")
+            print(f"测试模式: 每个扰动随机选择一个测试样本")
+            print(f"总测试次数: {len(perturbations)} (等于扰动数量)")
+        else:
+            print(f"\n📋 标准测试模式")
+            print(f"扰动文件: {args.perturbations}")
+            print(f"扰动数量: {len(perturbations)}")
+            print(f"测试模式: 遍历所有测试样本，每个样本使用一个扰动")
+            
     if args.format == 'wt':
         fmt_trans = True
 
@@ -1535,8 +1602,15 @@ def get_datasets(args):
 
         testdata = ptlk.data.datasets.ModelNet(args.dataset_path, train=0, transform=transform, classinfo=cinfo)
 
-        testset = ptlk.data.datasets.CADset4tracking_fixed_perturbation(testdata,\
-                        perturbations, fmt_trans=fmt_trans)
+        # 根据是否为gt_poses模式选择不同的数据集类
+        # Choose different dataset class based on whether it's gt_poses mode
+        if is_gt_poses_mode:
+            print(f"使用ModelNet随机选择模式...")
+            testset = ptlk.data.datasets.CADset4tracking_fixed_perturbation_random_sample(
+                testdata, perturbations, fmt_trans=fmt_trans, random_seed=42)
+        else:
+            testset = ptlk.data.datasets.CADset4tracking_fixed_perturbation(
+                testdata, perturbations, fmt_trans=fmt_trans)
     
     elif args.dataset_type == 'c3vd':
         # 修改：移除重采样，只保留基础变换
@@ -1546,12 +1620,27 @@ def get_datasets(args):
             # No longer includes any point cloud processing, will be handled in C3VDset4tracking
         ])
         
-        # 如果使用联合归一化，则在测试数据集类中处理
-        # If using joint normalization, handle in test dataset class
-        if args.use_joint_normalization:
-            print(f"\n====== Joint Normalization Settings ======")
-            print(f"Enable joint bounding box normalization: Use common bounding box to normalize paired point clouds")
-            print(f"Point cloud resampling: Resample to {args.num_points} points after joint normalization")
+        # 配置体素化参数（参考train_pointlk.py）
+        # Configure voxelization parameters (reference train_pointlk.py)
+        use_voxelization = getattr(args, 'use_voxelization', True)
+        voxel_config = None
+        if use_voxelization:
+            # 创建体素化配置
+            # Create voxelization configuration
+            voxel_config = ptlk.data.datasets.VoxelizationConfig(
+                voxel_size=getattr(args, 'voxel_size', 0.05),
+                voxel_grid_size=getattr(args, 'voxel_grid_size', 32),
+                max_voxel_points=getattr(args, 'max_voxel_points', 100),
+                max_voxels=getattr(args, 'max_voxels', 20000),
+                min_voxel_points_ratio=getattr(args, 'min_voxel_points_ratio', 0.1)
+            )
+            print(f"\n====== Voxelization Configuration ======")
+            print(f"体素化配置: 体素大小={voxel_config.voxel_size}, 网格尺寸={voxel_config.voxel_grid_size}")
+            print(f"每个体素最大点数={voxel_config.max_voxel_points}, 最大体素数量={voxel_config.max_voxels}")
+            print(f"最小体素点数比例={voxel_config.min_voxel_points_ratio}")
+        else:
+            print(f"\n====== Sampling Configuration ======")
+            print("使用简单重采样方法")
         
         # 创建C3VD数据集 - 配对模式支持
         # Create C3VD dataset - pairing mode support
@@ -1670,32 +1759,48 @@ def get_datasets(args):
         # Create fixed transformation
         fixed_transform = FixedTransformSE3(perturbations, fmt_trans)
         
-        # 使用我们新创建的测试专用数据集
-        # Use our newly created test-specific dataset
-        testset = ptlk.data.datasets.C3VDset4tracking_test(
-            testdata, 
-            fixed_transform, 
-            use_joint_normalization=args.use_joint_normalization,
-            num_points=args.num_points)  # 传递点数参数 # Pass point number parameter
+        # 根据是否为gt_poses模式选择不同的数据集类
+        # Choose different dataset class based on whether it's gt_poses mode
+        if is_gt_poses_mode:
+            print(f"使用C3VD随机选择模式...")
+            testset = ptlk.data.datasets.C3VDset4tracking_test_random_sample(
+                testdata, 
+                fixed_transform, 
+                num_points=args.num_points,  # 传递点数参数 # Pass point number parameter
+                use_voxelization=use_voxelization,
+                voxel_config=voxel_config,
+                random_seed=42
+            )
+        else:
+            # 使用我们新创建的测试专用数据集
+            # Use our newly created test-specific dataset
+            testset = ptlk.data.datasets.C3VDset4tracking_test(
+                testdata, 
+                fixed_transform, 
+                num_points=args.num_points,  # 传递点数参数 # Pass point number parameter
+                use_voxelization=use_voxelization,
+                voxel_config=voxel_config
+            )
         
         # 打印数据集信息
         # Print dataset information
         print(f"C3VD dataset total size: {len(c3vd_dataset)}")
         print(f"Test set size: {len(testset)}")
         
-        # 查看部分样本信息
-        # View partial sample information
-        print("\nSample pairing information examples:")
-        for i in range(min(3, len(c3vd_dataset.pairs))):
-            source_file, target_file = c3vd_dataset.pairs[i]
-            source_basename = os.path.basename(source_file)
-            target_basename = os.path.basename(target_file)
-            print(f"Sample {i}: source={source_basename}, target={target_basename}")
+        if not is_gt_poses_mode:
+            # 查看部分样本信息
+            # View partial sample information
+            print("\nSample pairing information examples:")
+            for i in range(min(3, len(c3vd_dataset.pairs))):
+                source_file, target_file = c3vd_dataset.pairs[i]
+                source_basename = os.path.basename(source_file)
+                target_basename = os.path.basename(target_file)
+                print(f"Sample {i}: source={source_basename}, target={target_basename}")
         
-        # 随机选择指定数量的样本进行测试
-        # Randomly select specified number of samples for testing
+        # 随机选择指定数量的样本进行测试（仅在非gt_poses模式下）
+        # Randomly select specified number of samples for testing (only in non-gt_poses mode)
         max_samples = args.max_samples
-        if len(testset) > max_samples:
+        if not is_gt_poses_mode and max_samples > 0 and len(testset) > max_samples:
             print(f"Dataset too large, randomly selecting {max_samples} samples for testing...")
             # 设置随机种子以确保可复现性
             # Set random seed to ensure reproducibility
@@ -1707,6 +1812,15 @@ def get_datasets(args):
             # Create subset
             testset = torch.utils.data.Subset(testset, indices)
             print(f"Sampled test set size: {len(testset)}")
+        elif not is_gt_poses_mode and max_samples <= 0:
+            print(f"Using all samples for testing (max_samples={max_samples} means no limit)...")
+            print(f"Full test set size: {len(testset)}")
+        elif not is_gt_poses_mode:
+            print(f"Dataset size ({len(testset)}) is within limit ({max_samples}), using all samples...")
+            print(f"Test set size: {len(testset)}")
+        elif is_gt_poses_mode:
+            print(f"GT_POSES模式: 忽略max_samples参数，测试扰动数量次")
+            print(f"Final test set size: {len(testset)}")
 
     return testset
 

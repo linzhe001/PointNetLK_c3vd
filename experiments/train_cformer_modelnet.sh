@@ -31,7 +31,7 @@ CATEGORY_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/experiments/sampledata/modelnet4
 NUM_POINTS=1024
 DEVICE="cuda:0"
 DATE_TAG=$(date +"%m%d")
-MAG=0.8 # 用于PointLK的变换幅度
+MAG=1.2 # 用于PointLK的变换幅度
 
 # CFormer特有配置
 DIM_K=1024                    # 特征维度

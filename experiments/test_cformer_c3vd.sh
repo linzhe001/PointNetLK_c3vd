@@ -1,9 +1,9 @@
 #!/usr/bin/bash
 #$ -l tmem=32G
 #$ -l h_vmem=32G            
-#$ -l h_rt=3600  # 1 hour test time
+#$ -l h_rt=36000  # 1小时测试时间
 #$ -l gpu=true
-#$ -l gpu_type=a6000
+
 #$ -pe gpu 1
 #$ -N ljiang_test_cformer_c3vd
 #$ -o /SAN/medic/MRpcr/logs/f_test_cformer_c3vd_output.log
@@ -11,316 +11,474 @@
 #$ -wd /SAN/medic/MRpcr
 
 cd /SAN/medic/MRpcr/PointNetLK_c3vd/experiments
-# Set working directory
-echo "Current working directory: $(pwd)"
+# 设置工作目录
+echo "当前工作目录: $(pwd)"
 
-# Activate Conda environment
-echo "Activating Conda environment..."
+# 激活Conda环境
+echo "激活Conda环境..."
 source /SAN/medic/MRpcr/miniconda3/etc/profile.d/conda.sh
 conda activate pointlk
 
-# Create results and log directories
+# 创建结果和日志目录
 mkdir -p /SAN/medic/MRpcr/results/cformer_c3vd/test_results
+mkdir -p /SAN/medic/MRpcr/results/cformer_c3vd/test_results/gt
 
-# Python command
+# Python命令
 PY3="nice -n 10 python"
 
-# Set variables
+# 设置变量
 DATASET_PATH="/SAN/medic/MRpcr/C3VD_datasets"
 CATEGORY_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/experiments/sampledata/c3vd.txt"
 NUM_POINTS=1024
 DEVICE="cuda:0"
 DATE_TAG=$(date +"%m%d")
 
-# CFormer model configuration (keep consistent with training)
-DIM_K=1024                    # Feature dimension
-NUM_PROXY_POINTS=8            # Number of proxy points
-NUM_BLOCKS=2                  # Number of CFormer blocks
-SYMFN="max"                   # Aggregation function: max, avg, or cd_pool
-MAX_ITER=20                   # LK maximum iterations
-DELTA=1.0e-2                  # LK step size
+# 体素化配置参数（与训练保持一致）
+USE_VOXELIZATION=true           # 是否启用体素化（true/false）
+VOXEL_SIZE=4                 # 体素大小 (适合医学点云)
+VOXEL_GRID_SIZE=32              # 体素网格尺寸
+MAX_VOXEL_POINTS=100            # 每个体素最大点数
+MAX_VOXELS=20000                # 最大体素数量
+MIN_VOXEL_POINTS_RATIO=0.1      # 最小体素点数比例
 
-# C3VD pairing mode settings (keep consistent with training)
-PAIR_MODE="one_to_one"  # Use point-to-point pairing mode
-REFERENCE_NAME=""  # Clear reference point cloud name
+# 构建体素化参数字符串
+VOXELIZATION_PARAMS=""
+if [ "${USE_VOXELIZATION}" = "true" ]; then
+    VOXELIZATION_PARAMS="--use-voxelization --voxel-size ${VOXEL_SIZE} --voxel-grid-size ${VOXEL_GRID_SIZE} --max-voxel-points ${MAX_VOXEL_POINTS} --max-voxels ${MAX_VOXELS} --min-voxel-points-ratio ${MIN_VOXEL_POINTS_RATIO}"
+else
+    VOXELIZATION_PARAMS="--no-voxelization"
+fi
+
+# CFormer模型配置（与训练保持一致）
+DIM_K=1024                    # 特征维度
+NUM_PROXY_POINTS=8            # 代理点数量
+NUM_BLOCKS=2                  # CFormer块数量
+SYMFN="max"                   # 聚合函数：max, avg, 或 cd_pool
+MAX_ITER=20                   # LK最大迭代次数
+DELTA=1.0e-2                  # LK步长
+
+# C3VD配对模式设置（与训练保持一致）
+PAIR_MODE="one_to_one"  # 使用点对点配对模式
+REFERENCE_NAME=""  # 清空参考点云名称
 REFERENCE_PARAM=""
 if [ "${PAIR_MODE}" = "scene_reference" ] && [ -n "${REFERENCE_NAME}" ]; then
   REFERENCE_PARAM="--reference-name ${REFERENCE_NAME}"
 fi
 
-# Joint normalization settings
-USE_JOINT_NORM="--use-joint-normalization"
+# 最大测试样本数
+MAX_SAMPLES_ROUND1=1000  # 第一轮测试：角度扰动文件的最大样本数
+MAX_SAMPLES_ROUND2=0 # 第二轮测试：精度测试文件的最大样本数
 
-# Maximum test samples
-MAX_SAMPLES=2000
-
-# Visualization settings (optional)
-VISUALIZE_PERT="" # If visualization needed, set to "--visualize-pert pert_010.csv pert_020.csv"
+# 可视化设置（可选）
+VISUALIZE_PERT="" # 如需可视化，设置为 "--visualize-pert pert_010.csv pert_020.csv"
 VISUALIZE_SAMPLES=3
 
-# Model path (needs to be adjusted according to actual training results)
-CFORMER_MODEL_PREFIX="/SAN/medic/MRpcr/results/cformer_c3vd/cformer_pointlk_${DATE_TAG}"
-CFORMER_MODEL="${CFORMER_MODEL_PREFIX}_model_best.pth"
-# Note: During testing, only use complete registration model weights, no separate feature weights needed
+# 模型路径（使用指定的权重文件）
+CFORMER_MODEL="/SAN/medic/MRpcr/results/cformer_c3vd/cformer_pointlk_resume_0620_model_best.pth"
+# 提取模型前缀用于日志记录
+CFORMER_MODEL_PREFIX=$(echo "${CFORMER_MODEL}" | sed 's/_model_best\.pth$//')
 
-# If today's model not found, try to find the latest model
+# 检查指定的模型文件是否存在
 if [ ! -f "${CFORMER_MODEL}" ]; then
-    echo "⚠️  Today's model file not found: ${CFORMER_MODEL}"
-    echo "🔍 Searching for latest cformer model..."
-    
-    # Search for latest cformer pointlk model
-    LATEST_MODEL=$(find /SAN/medic/MRpcr/results/cformer_c3vd/ -name "cformer_pointlk_*_model_best.pth" -type f -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-    
-    if [ -n "${LATEST_MODEL}" ] && [ -f "${LATEST_MODEL}" ]; then
-        CFORMER_MODEL="${LATEST_MODEL}"
-        # Extract model prefix
-        CFORMER_MODEL_PREFIX=$(echo "${CFORMER_MODEL}" | sed 's/_model_best\.pth$//')
-        echo "✅ Found latest model: ${CFORMER_MODEL}"
-    else
-        echo "❌ Error: No cformer model files found!"
-        echo "Please ensure train_cformer_c3vd.sh has been run and successfully trained the model"
-        exit 1
-    fi
+    echo "❌ 错误: 指定的CFormer模型文件不存在: ${CFORMER_MODEL}"
+    echo "请确保模型文件路径正确"
+    exit 1
+else
+    echo "✅ 使用指定的CFormer模型: ${CFORMER_MODEL}"
+    MODEL_SIZE=$(du -h "${CFORMER_MODEL}" | cut -f1)
+    echo "📊 模型文件大小: ${MODEL_SIZE}"
 fi
 
-# Perturbation file directory
+# 扰动文件配置
 PERTURBATION_DIR="/SAN/medic/MRpcr/PointNetLK_c3vd/gt"
+GT_POSES_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/gt_poses.csv"
 
-# Test results output directory
+# 测试结果输出目录
 TEST_RESULTS_DIR="/SAN/medic/MRpcr/results/cformer_c3vd/test_results"
-# Base name for output files - results will be stored in subdirectories based on angle
-TEST_OUTPUT_PREFIX="${TEST_RESULTS_DIR}/results"
 TEST_LOG="${TEST_RESULTS_DIR}/test_log_${DATE_TAG}.log"
 
-# Print configuration information
-echo "========== CFormer Registration Model Test Configuration =========="
-echo "🧠 Model type: CFormer registration model"
-echo "📂 Dataset path: ${DATASET_PATH}"
-echo "📄 Category file: ${CATEGORY_FILE}"
-echo "🔗 Pairing mode: ${PAIR_MODE}"
-echo "🎯 Reference point cloud: ${REFERENCE_NAME:-'Auto-select'}"
-echo "🎲 Number of points: ${NUM_POINTS}"
-echo "🖥️  Device: ${DEVICE}"
-echo "📊 Maximum test samples: ${MAX_SAMPLES}"
+# 打印配置信息
+echo "========== CFormer配准模型测试配置 =========="
+echo "🧠 模型类型: CFormer配准模型"
+echo "📂 数据集路径: ${DATASET_PATH}"
+echo "📄 类别文件: ${CATEGORY_FILE}"
+echo "🔗 配对模式: ${PAIR_MODE}"
+echo "🎯 参考点云: ${REFERENCE_NAME:-'自动选择'}"
+echo "🎲 点云数量: ${NUM_POINTS}"
+echo "🖥️  设备: ${DEVICE}"
+echo "📊 第一轮最大测试样本: ${MAX_SAMPLES_ROUND1}"
+echo "📊 第二轮最大测试样本: ${MAX_SAMPLES_ROUND2}"
 echo ""
-echo "🔧 CFormer parameters:"
-echo "   - Feature dimension: ${DIM_K}"
-echo "   - Number of proxy points: ${NUM_PROXY_POINTS}"
-echo "   - Number of CFormer blocks: ${NUM_BLOCKS}"
-echo "   - Aggregation function: ${SYMFN}"
-echo "   - LK max iterations: ${MAX_ITER}"
-echo "   - LK step size: ${DELTA}"
+echo "🔧 体素化配置:"
+echo "   - 启用体素化: ${USE_VOXELIZATION}"
+if [ "${USE_VOXELIZATION}" = "true" ]; then
+    echo "   - 体素大小: ${VOXEL_SIZE}"
+    echo "   - 体素网格尺寸: ${VOXEL_GRID_SIZE}"
+    echo "   - 每个体素最大点数: ${MAX_VOXEL_POINTS}"
+    echo "   - 最大体素数量: ${MAX_VOXELS}"
+    echo "   - 最小体素点数比例: ${MIN_VOXEL_POINTS_RATIO}"
+fi
 echo ""
-echo "📁 Model files:"
-echo "   - Registration model: ${CFORMER_MODEL}"
-echo "   - Perturbation directory: ${PERTURBATION_DIR}"
+echo "🔧 CFormer参数:"
+echo "   - 特征维度: ${DIM_K}"
+echo "   - 代理点数量: ${NUM_PROXY_POINTS}"
+echo "   - CFormer块数量: ${NUM_BLOCKS}"
+echo "   - 聚合函数: ${SYMFN}"
+echo "   - LK最大迭代: ${MAX_ITER}"
+echo "   - LK步长: ${DELTA}"
 echo ""
-echo "📁 Output paths:"
-echo "   - Test result prefix: ${TEST_OUTPUT_PREFIX}"
-echo "   - Test log: ${TEST_LOG}"
+echo "📁 模型文件:"
+echo "   - 配准模型: ${CFORMER_MODEL}"
+echo "   - 扰动目录: ${PERTURBATION_DIR}"
+echo "   - GT姿态文件: ${GT_POSES_FILE}"
+echo ""
+echo "📁 输出路径:"
+echo "   - 测试结果目录: ${TEST_RESULTS_DIR}"
+echo "   - 测试日志: ${TEST_LOG}"
 
-# Check necessary files
+# 检查必要文件
 echo ""
-echo "========== File Check =========="
+echo "========== 文件检查 =========="
 
-# Check dataset
+# 检查数据集
 if [ -d "${DATASET_PATH}" ]; then
-    echo "✅ Dataset directory exists"
+    echo "✅ 数据集目录存在"
     SOURCE_COUNT=$(find "${DATASET_PATH}/C3VD_ply_source" -name "*.ply" 2>/dev/null | wc -l)
     TARGET_COUNT=$(find "${DATASET_PATH}/visible_point_cloud_ply_depth" -name "*.ply" 2>/dev/null | wc -l)
-    echo "📊 Source point cloud file count: ${SOURCE_COUNT}"
-    echo "📊 Target point cloud file count: ${TARGET_COUNT}"
+    echo "📊 源点云文件数量: ${SOURCE_COUNT}"
+    echo "📊 目标点云文件数量: ${TARGET_COUNT}"
 else
-    echo "❌ Error: Dataset directory does not exist: ${DATASET_PATH}"
+    echo "❌ 错误: 数据集目录不存在: ${DATASET_PATH}"
     exit 1
 fi
 
-# Check category file
+# 检查类别文件
 if [ -f "${CATEGORY_FILE}" ]; then
-    echo "✅ Category file exists"
+    echo "✅ 类别文件存在"
     CATEGORY_COUNT=$(wc -l < "${CATEGORY_FILE}")
-    echo "📊 Category count: ${CATEGORY_COUNT}"
+    echo "📊 类别数量: ${CATEGORY_COUNT}"
 else
-    echo "❌ Error: Category file does not exist: ${CATEGORY_FILE}"
+    echo "❌ 错误: 类别文件不存在: ${CATEGORY_FILE}"
     exit 1
 fi
 
-# Check model file
+# 检查模型文件
 if [ -f "${CFORMER_MODEL}" ]; then
-    echo "✅ CFormer registration model exists: ${CFORMER_MODEL}"
+    echo "✅ CFormer配准模型存在: ${CFORMER_MODEL}"
     MODEL_SIZE=$(du -h "${CFORMER_MODEL}" | cut -f1)
-    echo "📊 Model file size: ${MODEL_SIZE}"
+    echo "📊 模型文件大小: ${MODEL_SIZE}"
 else
-    echo "❌ Error: CFormer registration model does not exist: ${CFORMER_MODEL}"
+    echo "❌ 错误: CFormer配准模型不存在: ${CFORMER_MODEL}"
     exit 1
 fi
 
-# Check perturbation directory
+# 检查扰动目录
 if [ -d "${PERTURBATION_DIR}" ]; then
-    echo "✅ Perturbation directory exists"
-    PERT_COUNT=$(find "${PERTURBATION_DIR}" -name "*.csv" | wc -l)
-    echo "📊 Perturbation file count: ${PERT_COUNT}"
+    echo "✅ 扰动目录存在"
+    PERT_COUNT=$(find "${PERTURBATION_DIR}" -name "pert_*.csv" | wc -l)
+    echo "📊 扰动文件数量: ${PERT_COUNT}"
     if [ ${PERT_COUNT} -eq 0 ]; then
-        echo "⚠️  Warning: No .csv files in perturbation directory"
-        echo "Will try to generate default perturbation files..."
-        # Code to generate perturbation files can be added here
+        echo "⚠️  警告: 扰动目录中没有pert_*.csv文件"
     else
-        echo "📋 Perturbation file list:"
-        find "${PERTURBATION_DIR}" -name "*.csv" | head -5
+        echo "📋 扰动文件列表:"
+        find "${PERTURBATION_DIR}" -name "pert_*.csv" | sort | head -5
         if [ ${PERT_COUNT} -gt 5 ]; then
-            echo "   ... (total ${PERT_COUNT} perturbation files)"
+            echo "   ... (共${PERT_COUNT}个扰动文件)"
         fi
     fi
 else
-    echo "❌ Error: Perturbation directory does not exist: ${PERTURBATION_DIR}"
+    echo "❌ 错误: 扰动目录不存在: ${PERTURBATION_DIR}"
     exit 1
 fi
 
-# GPU memory check
+# 检查GT姿态文件
+if [ -f "${GT_POSES_FILE}" ]; then
+    echo "✅ GT姿态文件存在: ${GT_POSES_FILE}"
+    GT_POSES_SIZE=$(du -h "${GT_POSES_FILE}" | cut -f1)
+    GT_POSES_LINES=$(wc -l < "${GT_POSES_FILE}")
+    echo "📊 GT姿态文件大小: ${GT_POSES_SIZE}"
+    echo "📊 GT姿态条目数量: ${GT_POSES_LINES}"
+else
+    echo "❌ 错误: GT姿态文件不存在: ${GT_POSES_FILE}"
+    exit 1
+fi
+
+# GPU内存检查
 echo ""
-echo "========== GPU Status Check =========="
+echo "========== GPU状态检查 =========="
 if command -v nvidia-smi &> /dev/null; then
-    echo "🖥️  GPU information:"
+    echo "🖥️  GPU信息:"
     nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits
 else
-    echo "⚠️  Unable to get GPU information"
+    echo "⚠️  无法获取GPU信息"
 fi
 
 echo ""
-echo "========== Starting CFormer Registration Model Test =========="
-echo "🚀 About to start testing..."
-echo "⏱️  Estimated test time: ~30-60 minutes (depends on number of perturbation files and samples)"
+echo "========== 开始CFormer配准模型测试 =========="
+echo "🚀 即将开始两轮测试..."
+echo "⏱️  预计测试时间: ~60-120分钟（依据扰动文件数量和样本数量）"
+if [ "${USE_VOXELIZATION}" = "true" ]; then
+    echo "🔧 启用体素化预处理，可能会稍微增加处理时间"
+fi
 echo ""
 
-# Build visualization parameters
+# 构建可视化参数
 VISUALIZE_PARAMS=""
 if [ -n "${VISUALIZE_PERT}" ]; then
     VISUALIZE_PARAMS="${VISUALIZE_PERT} --visualize-samples ${VISUALIZE_SAMPLES}"
 fi
 
-# Run test
+# =============================================================================
+# 第一轮测试：处理gt文件夹中的扰动文件（0-90度）
+# =============================================================================
+# echo ""
+# echo "========== 第一轮测试：角度扰动文件 =========="
+# echo "🎯 测试目标: 处理 gt 文件夹中的 10 个扰动文件（0-90度）"
+# echo "📂 扰动目录: ${PERTURBATION_DIR}"
+# echo "📁 结果存储: 各角度子目录（angle_000 到 angle_090）"
+# echo ""
+
+# # 第一轮测试的输出前缀
+# TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
+
+# # 运行第一轮测试
+# echo "🚀 开始第一轮测试..."
+# ${PY3} test_pointlk.py \
+#   -o ${TEST_OUTPUT_PREFIX_ROUND1} \
+#   -i ${DATASET_PATH} \
+#   -c ${CATEGORY_FILE} \
+#   -l ${TEST_LOG} \
+#   --dataset-type c3vd \
+#   --num-points ${NUM_POINTS} \
+#   --max-iter ${MAX_ITER} \
+#   --delta ${DELTA} \
+#   --device ${DEVICE} \
+#   --max-samples ${MAX_SAMPLES_ROUND1} \
+#   --pair-mode ${PAIR_MODE} \
+#   ${REFERENCE_PARAM} \
+#   --perturbation-dir ${PERTURBATION_DIR} \
+#   --model-type cformer \
+#   --dim-k ${DIM_K} \
+#   --num-proxy-points ${NUM_PROXY_POINTS} \
+#   --num-blocks ${NUM_BLOCKS} \
+#   --symfn ${SYMFN} \
+#   --pretrained ${CFORMER_MODEL} \
+#   ${VOXELIZATION_PARAMS} \
+#   ${VISUALIZE_PARAMS}
+
+# # 检查第一轮测试结果
+# if [ $? -eq 0 ]; then
+#     echo ""
+#     echo "✅ 第一轮测试（角度扰动）完成!"
+    
+#     # 统计第一轮结果
+#     ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
+#     echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
+#     if [ ${ANGLE_DIRS} -gt 0 ]; then
+#         echo "📋 角度目录列表:"
+#         find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
+#         if [ ${ANGLE_DIRS} -gt 5 ]; then
+#             echo "   ... (共${ANGLE_DIRS}个角度目录)"
+#         fi
+#     fi
+# else
+#     echo ""
+#     echo "❌ 第一轮测试（角度扰动）失败!"
+#     echo "请检查错误日志: ${TEST_LOG}"
+    
+#     # 显示最后几行错误信息
+#     if [ -f "${TEST_LOG}" ]; then
+#         echo ""
+#         echo "📋 最新错误信息:"
+#         tail -10 "${TEST_LOG}"
+#     fi
+    
+#     exit 1
+# fi
+
+# =============================================================================
+# 第二轮测试：处理单独的gt_poses.csv文件
+# =============================================================================
+echo ""
+echo "========== 第二轮测试：GT姿态文件 =========="
+echo "🎯 测试目标: 处理GT姿态文件"
+echo "📄 GT文件: ${GT_POSES_FILE}"
+echo "📁 结果存储: gt 子目录"
+echo ""
+
+# 第二轮测试的输出前缀（指向gt子目录）
+TEST_OUTPUT_PREFIX_ROUND2="${TEST_RESULTS_DIR}/gt/results"
+TEST_LOG_ROUND2="${TEST_RESULTS_DIR}/gt/test_log_gt_${DATE_TAG}.log"
+
+echo "🚀 开始第二轮测试..."
+echo "📄 直接使用GT姿态文件: ${GT_POSES_FILE}"
+echo "🎯 GT_POSES模式将自动激活（每个扰动随机选择一个测试样本）"
+
+# 构建第二轮测试的MAX_SAMPLES参数
+MAX_SAMPLES_PARAM_ROUND2=""
+if [ ${MAX_SAMPLES_ROUND2} -gt 0 ]; then
+    MAX_SAMPLES_PARAM_ROUND2="--max-samples ${MAX_SAMPLES_ROUND2}"
+fi
+
+# 运行第二轮测试 - 直接使用GT姿态文件
 ${PY3} test_pointlk.py \
-  -o ${TEST_OUTPUT_PREFIX} \
+  -o ${TEST_OUTPUT_PREFIX_ROUND2} \
   -i ${DATASET_PATH} \
   -c ${CATEGORY_FILE} \
-  -l ${TEST_LOG} \
+  -l ${TEST_LOG_ROUND2} \
   --dataset-type c3vd \
   --num-points ${NUM_POINTS} \
   --max-iter ${MAX_ITER} \
   --delta ${DELTA} \
   --device ${DEVICE} \
-  --max-samples ${MAX_SAMPLES} \
+  ${MAX_SAMPLES_PARAM_ROUND2} \
   --pair-mode ${PAIR_MODE} \
   ${REFERENCE_PARAM} \
-  ${USE_JOINT_NORM} \
-  --perturbation-dir ${PERTURBATION_DIR} \
+  --perturbation-file ${GT_POSES_FILE} \
   --model-type cformer \
   --dim-k ${DIM_K} \
   --num-proxy-points ${NUM_PROXY_POINTS} \
   --num-blocks ${NUM_BLOCKS} \
   --symfn ${SYMFN} \
   --pretrained ${CFORMER_MODEL} \
+  ${VOXELIZATION_PARAMS} \
   ${VISUALIZE_PARAMS}
 
-# Check test results
+# 检查第二轮测试结果
 if [ $? -eq 0 ]; then
     echo ""
-    echo "🎉 CFormer registration model test completed!"
-    echo "📁 Test results saved to: ${TEST_RESULTS_DIR}"
-    echo "📋 Test log: ${TEST_LOG}"
+    echo "✅ 第二轮测试（GT姿态）完成!"
     
-    # Display generated result files - modified to show angle directories and log files
-    echo ""
-    echo "📊 Generated test result directories:"
-    find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | xargs ls -ld
-    
-    echo ""
-    echo "📊 Sample result files:"
-    # Find and display some result files from angle directories
-    find "${TEST_RESULTS_DIR}/angle_"* -name "*.log" -type f | sort | head -10 | xargs ls -lh
-    
-    # Statistics
-    echo ""
-    echo "📈 Test statistics:"
-    # Count all log files (both in angle directories and main directory)
-    RESULT_FILES=$(find "${TEST_RESULTS_DIR}" -name "*.log" -type f | wc -l)
-    echo "   - Total result file count: ${RESULT_FILES}"
-    
-    # Count angle directories
-    ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
-    echo "   - Angle directories: ${ANGLE_DIRS}"
-    
-    if [ ${RESULT_FILES} -gt 0 ]; then
-        # Display statistics from a sample result file
-        SAMPLE_FILE=$(find "${TEST_RESULTS_DIR}" -name "results_*.log" -type f | head -1)
-        if [ -f "${SAMPLE_FILE}" ]; then
-            echo "   - Sample result file: ${SAMPLE_FILE}"
-            echo "   - Result file statistics preview:"
-            # Display statistics section (final statistical results)
-            grep "# Average.*error:" "${SAMPLE_FILE}" | head -3
-        fi
+    # 统计第二轮结果
+    GT_RESULT_FILES=$(find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f | wc -l)
+    echo "📊 生成的GT结果文件数: ${GT_RESULT_FILES}"
+    if [ ${GT_RESULT_FILES} -gt 0 ]; then
+        echo "📋 GT结果文件列表:"
+        find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f | sort | head -5
     fi
-    
 else
     echo ""
-    echo "❌ CFormer registration model test failed!"
-    echo "Please check error log: ${TEST_LOG}"
+    echo "❌ 第二轮测试（GT姿态）失败!"
+    echo "请检查错误日志: ${TEST_LOG_ROUND2}"
     
-    # Display last few lines of error information
-    if [ -f "${TEST_LOG}" ]; then
+    # 显示最后几行错误信息
+    if [ -f "${TEST_LOG_ROUND2}" ]; then
         echo ""
-        echo "📋 Latest error information:"
-        tail -10 "${TEST_LOG}"
+        echo "📋 最新错误信息:"
+        tail -10 "${TEST_LOG_ROUND2}"
     fi
     
     exit 1
 fi
 
-# Save test configuration information
+echo ""
+echo "🎯 GT_POSES模式测试说明:"
+echo "   - 直接使用了gt_poses.csv文件"
+echo "   - 系统自动检测到文件名包含'gt_poses'，启用随机选择模式"
+echo "   - 每个扰动随机选择一个测试样本进行测试"
+echo "   - 总测试次数等于扰动数量（而不是数据集大小）"
+
+# =============================================================================
+# 最终结果汇总
+# =============================================================================
+echo ""
+echo "🎉 所有测试完成!"
+echo "📁 测试结果保存到: ${TEST_RESULTS_DIR}"
+echo "📋 主测试日志: ${TEST_LOG}"
+echo "📋 GT测试日志: ${TEST_LOG_ROUND2}"
+
+# 显示生成的结果文件汇总
+echo ""
+echo "📊 最终测试结果汇总:"
+
+# 统计角度目录（第一轮测试被注释掉，角度目录数为0）
+ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" 2>/dev/null | wc -l)
+echo "   - 角度测试目录数: ${ANGLE_DIRS}（第一轮测试已注释掉）"
+
+# 统计GT目录结果
+GT_RESULT_FILES=$(find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f 2>/dev/null | wc -l)
+echo "   - GT测试结果文件数: ${GT_RESULT_FILES}"
+
+# 统计总结果文件
+TOTAL_RESULT_FILES=$(find "${TEST_RESULTS_DIR}" -name "*.log" -type f | wc -l)
+echo "   - 总结果文件数量: ${TOTAL_RESULT_FILES}"
+
+echo ""
+echo "📂 结果目录结构:"
+echo "   ${TEST_RESULTS_DIR}/"
+echo "   ├── angle_*/ (第一轮：角度扰动测试 - 已注释掉)"
+echo "   ├── gt/       (第二轮：GT姿态测试)"
+echo "   ├── test_log_${DATE_TAG}.log (主测试日志 - 已注释掉)"
+echo "   └── gt/test_log_gt_${DATE_TAG}.log (GT测试日志)"
+
+# 保存测试配置信息
 CONFIG_FILE="${TEST_RESULTS_DIR}/cformer_test_${DATE_TAG}_config.txt"
-echo "🧠 CFormer Registration Model Test Configuration" > ${CONFIG_FILE}
+echo "🧠 CFormer配准模型双轮测试配置" > ${CONFIG_FILE}
 echo "=====================================" >> ${CONFIG_FILE}
-echo "Test completion time: $(date)" >> ${CONFIG_FILE}
+echo "测试完成时间: $(date)" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "🔧 Model configuration:" >> ${CONFIG_FILE}
-echo "Model type: CFormer registration model" >> ${CONFIG_FILE}
-echo "Feature dimension: ${DIM_K}" >> ${CONFIG_FILE}
-echo "Number of proxy points: ${NUM_PROXY_POINTS}" >> ${CONFIG_FILE}
-echo "Number of CFormer blocks: ${NUM_BLOCKS}" >> ${CONFIG_FILE}
-echo "Aggregation function: ${SYMFN}" >> ${CONFIG_FILE}
-echo "LK max iterations: ${MAX_ITER}" >> ${CONFIG_FILE}
-echo "LK step size: ${DELTA}" >> ${CONFIG_FILE}
+echo "🔧 测试轮次:" >> ${CONFIG_FILE}
+echo "第一轮: 角度扰动文件测试（gt 文件夹中的 pert_*.csv）" >> ${CONFIG_FILE}
+echo "第二轮: GT姿态文件测试（gt_poses.csv）" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "📊 Test configuration:" >> ${CONFIG_FILE}
-echo "Dataset path: ${DATASET_PATH}" >> ${CONFIG_FILE}
-echo "Category file: ${CATEGORY_FILE}" >> ${CONFIG_FILE}
-echo "Pairing mode: ${PAIR_MODE}" >> ${CONFIG_FILE}
-if [ "${PAIR_MODE}" = "scene_reference" ] && [ -n "${REFERENCE_NAME}" ]; then
-  echo "Reference point cloud name: ${REFERENCE_NAME}" >> ${CONFIG_FILE}
+echo "🔧 模型配置:" >> ${CONFIG_FILE}
+echo "模型类型: CFormer配准模型" >> ${CONFIG_FILE}
+echo "特征维度: ${DIM_K}" >> ${CONFIG_FILE}
+echo "代理点数量: ${NUM_PROXY_POINTS}" >> ${CONFIG_FILE}
+echo "CFormer块数量: ${NUM_BLOCKS}" >> ${CONFIG_FILE}
+echo "聚合函数: ${SYMFN}" >> ${CONFIG_FILE}
+echo "LK最大迭代: ${MAX_ITER}" >> ${CONFIG_FILE}
+echo "LK步长: ${DELTA}" >> ${CONFIG_FILE}
+echo "" >> ${CONFIG_FILE}
+echo "🔧 体素化配置:" >> ${CONFIG_FILE}
+echo "启用体素化: ${USE_VOXELIZATION}" >> ${CONFIG_FILE}
+if [ "${USE_VOXELIZATION}" = "true" ]; then
+    echo "体素大小: ${VOXEL_SIZE}" >> ${CONFIG_FILE}
+    echo "体素网格尺寸: ${VOXEL_GRID_SIZE}" >> ${CONFIG_FILE}
+    echo "每个体素最大点数: ${MAX_VOXEL_POINTS}" >> ${CONFIG_FILE}
+    echo "最大体素数量: ${MAX_VOXELS}" >> ${CONFIG_FILE}
+    echo "最小体素点数比例: ${MIN_VOXEL_POINTS_RATIO}" >> ${CONFIG_FILE}
 fi
-echo "Number of points: ${NUM_POINTS}" >> ${CONFIG_FILE}
-echo "Maximum test samples: ${MAX_SAMPLES}" >> ${CONFIG_FILE}
-echo "Device: ${DEVICE}" >> ${CONFIG_FILE}
-echo "Perturbation directory: ${PERTURBATION_DIR}" >> ${CONFIG_FILE}
-echo "Joint normalization: Yes" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "📁 Model files:" >> ${CONFIG_FILE}
-echo "Registration model: ${CFORMER_MODEL}" >> ${CONFIG_FILE}
+echo "📊 测试配置:" >> ${CONFIG_FILE}
+echo "数据集路径: ${DATASET_PATH}" >> ${CONFIG_FILE}
+echo "类别文件: ${CATEGORY_FILE}" >> ${CONFIG_FILE}
+echo "配对模式: ${PAIR_MODE}" >> ${CONFIG_FILE}
+if [ "${PAIR_MODE}" = "scene_reference" ] && [ -n "${REFERENCE_NAME}" ]; then
+  echo "参考点云名称: ${REFERENCE_NAME}" >> ${CONFIG_FILE}
+fi
+echo "点云数量: ${NUM_POINTS}" >> ${CONFIG_FILE}
+echo "第一轮最大测试样本: ${MAX_SAMPLES_ROUND1}" >> ${CONFIG_FILE}
+echo "第二轮最大测试样本: ${MAX_SAMPLES_ROUND2}" >> ${CONFIG_FILE}
+echo "设备: ${DEVICE}" >> ${CONFIG_FILE}
+echo "扰动目录（第一轮）: ${PERTURBATION_DIR}" >> ${CONFIG_FILE}
+echo "GT姿态文件（第二轮）: ${GT_POSES_FILE}" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
-echo "📁 Output files:" >> ${CONFIG_FILE}
-echo "Test result prefix: ${TEST_OUTPUT_PREFIX}" >> ${CONFIG_FILE}
-echo "Test log: ${TEST_LOG}" >> ${CONFIG_FILE}
+echo "📁 模型文件:" >> ${CONFIG_FILE}
+echo "配准模型: ${CFORMER_MODEL}" >> ${CONFIG_FILE}
+echo "" >> ${CONFIG_FILE}
+echo "📁 输出文件:" >> ${CONFIG_FILE}
+echo "第一轮测试结果: ${TEST_OUTPUT_PREFIX_ROUND1}" >> ${CONFIG_FILE}
+echo "第二轮测试结果: ${TEST_OUTPUT_PREFIX_ROUND2}" >> ${CONFIG_FILE}
+echo "主测试日志: ${TEST_LOG}" >> ${CONFIG_FILE}
+echo "GT测试日志: ${TEST_LOG_ROUND2}" >> ${CONFIG_FILE}
 
 echo ""
-echo "💾 Test configuration information saved to: ${CONFIG_FILE}"
+echo "💾 测试配置信息已保存到: ${CONFIG_FILE}"
 
 echo ""
-echo "🎯 Test completion summary:"
-echo "📂 Result directory: ${TEST_RESULTS_DIR}"
-echo "📄 Configuration file: ${CONFIG_FILE}"
-echo "🎯 Registration model: ${CFORMER_MODEL}"
-echo "📋 Test log: ${TEST_LOG}"
-echo "⏰ Completion time: $(date)"
+echo "🎯 测试完成总结:"
+echo "📂 结果目录: ${TEST_RESULTS_DIR}"
+echo "📄 配置文件: ${CONFIG_FILE}"
+echo "🎯 配准模型: ${CFORMER_MODEL}"
+echo "📋 第一轮（角度）日志: ${TEST_LOG}"
+echo "📋 第二轮（GT）日志: ${TEST_LOG_ROUND2}"
+if [ "${USE_VOXELIZATION}" = "true" ]; then
+    echo "🔧 使用了体素化预处理技术"
+fi
+echo "⏰ 完成时间: $(date)"
 
 echo ""
-echo "🎉🎉🎉 CFormer registration model test all completed! 🎉🎉🎉" 
+echo "🎉🎉🎉 CFormer配准模型双轮测试全部完成! 🎉🎉🎉" 
+echo "📊 第一轮：角度扰动测试（存储在angle_*目录中）- 已注释掉"
+echo "📊 第二轮：GT姿态测试（存储在gt目录中）" 
