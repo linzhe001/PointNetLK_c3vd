@@ -56,7 +56,7 @@ D_STATE=8                     # 状态空间维度
 EXPAND=2                      # 扩展因子
 SYMFN="max"                   # 聚合函数：max, avg, 或 selective
 MAX_ITER=20                   # LK最大迭代次数
-DELTA=1.0e-2                  # LK步长
+DELTA=1.0e-4                  # LK步长
 
 # C3VD配对模式设置（与训练保持一致）
 PAIR_MODE="one_to_one"  # 使用点对点配对模式
@@ -223,70 +223,70 @@ fi
 # =============================================================================
 # 第一轮测试：处理gt文件夹中的扰动文件（0-90度）
 # =============================================================================
-# echo "========== 第一轮测试：角度扰动文件 =========="
-# echo "🎯 测试目标: 处理 gt 文件夹中的 10 个扰动文件（0-90度）"
-# echo "📂 扰动目录: ${PERTURBATION_DIR}"
-# echo "📁 结果存储: 各角度子目录（angle_000 到 angle_090）"
-# echo ""
+echo "========== 第一轮测试：角度扰动文件 =========="
+echo "🎯 测试目标: 处理 gt 文件夹中的 10 个扰动文件（0-90度）"
+echo "📂 扰动目录: ${PERTURBATION_DIR}"
+echo "📁 结果存储: 各角度子目录（angle_000 到 angle_090）"
+echo ""
 
-# # 第一轮测试的输出前缀
-# TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
+# 第一轮测试的输出前缀
+TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
 
-# # 运行第一轮测试
-# echo "🚀 开始第一轮测试..."
-# ${PY3} test_pointlk.py \
-#   -o ${TEST_OUTPUT_PREFIX_ROUND1} \
-#   -i ${DATASET_PATH} \
-#   -c ${CATEGORY_FILE} \
-#   -l ${TEST_LOG} \
-#   --dataset-type c3vd \
-#   --num-points ${NUM_POINTS} \
-#   --max-iter ${MAX_ITER} \
-#   --delta ${DELTA} \
-#   --device ${DEVICE} \
-#   --max-samples ${MAX_SAMPLES_ROUND1} \
-#   --pair-mode ${PAIR_MODE} \
-#   ${REFERENCE_PARAM} \
-#   --perturbation-dir ${PERTURBATION_DIR} \
-#   --model-type mamba3d \
-#   --dim-k ${DIM_K} \
-#   --num-mamba-blocks ${NUM_MAMBA_BLOCKS} \
-#   --d-state ${D_STATE} \
-#   --expand ${EXPAND} \
-#   --symfn ${SYMFN} \
-#   --pretrained ${MAMBA3D_MODEL} \
-#   ${VOXELIZATION_PARAMS} \
-#   ${VISUALIZE_PARAMS}
+# 运行第一轮测试
+echo "🚀 开始第一轮测试..."
+${PY3} test_pointlk.py \
+  -o ${TEST_OUTPUT_PREFIX_ROUND1} \
+  -i ${DATASET_PATH} \
+  -c ${CATEGORY_FILE} \
+  -l ${TEST_LOG} \
+  --dataset-type c3vd \
+  --num-points ${NUM_POINTS} \
+  --max-iter ${MAX_ITER} \
+  --delta ${DELTA} \
+  --device ${DEVICE} \
+  --max-samples ${MAX_SAMPLES_ROUND1} \
+  --pair-mode ${PAIR_MODE} \
+  ${REFERENCE_PARAM} \
+  --perturbation-dir ${PERTURBATION_DIR} \
+  --model-type mamba3d \
+  --dim-k ${DIM_K} \
+  --num-mamba-blocks ${NUM_MAMBA_BLOCKS} \
+  --d-state ${D_STATE} \
+  --expand ${EXPAND} \
+  --symfn ${SYMFN} \
+  --pretrained ${MAMBA3D_MODEL} \
+  ${VOXELIZATION_PARAMS} \
+  ${VISUALIZE_PARAMS}
 
-# # 检查第一轮测试结果
-# if [ $? -eq 0 ]; then
-#     echo ""
-#     echo "✅ 第一轮测试（角度扰动）完成!"
-    
-#     # 统计第一轮结果
-#     ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
-#     echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
-#     if [ ${ANGLE_DIRS} -gt 0 ]; then
-#         echo "📋 角度目录列表:"
-#         find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
-#         if [ ${ANGLE_DIRS} -gt 5 ]; then
-#             echo "   ... (共${ANGLE_DIRS}个角度目录)"
-#         fi
-#     fi
-# else
-#     echo ""
-#     echo "❌ 第一轮测试（角度扰动）失败!"
-#     echo "请检查错误日志: ${TEST_LOG}"
-    
-#     # 显示最后几行错误信息
-#     if [ -f "${TEST_LOG}" ]; then
-#         echo ""
-#         echo "📋 最新错误信息:"
-#         tail -10 "${TEST_LOG}"
-#     fi
-    
-#     exit 1
-# fi
+# 检查第一轮测试结果
+if [ $? -eq 0 ]; then
+    echo ""
+    echo "✅ 第一轮测试（角度扰动）完成!"
+
+    # 统计第一轮结果
+    ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
+    echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
+    if [ ${ANGLE_DIRS} -gt 0 ]; then
+        echo "📋 角度目录列表:"
+        find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
+        if [ ${ANGLE_DIRS} -gt 5 ]; then
+            echo "   ... (共${ANGLE_DIRS}个角度目录)"
+        fi
+    fi
+else
+    echo ""
+    echo "❌ 第一轮测试（角度扰动）失败!"
+    echo "请检查错误日志: ${TEST_LOG}"
+
+    # 显示最后几行错误信息
+    if [ -f "${TEST_LOG}" ]; then
+        echo ""
+        echo "📋 最新错误信息:"
+        tail -10 "${TEST_LOG}"
+    fi
+
+    exit 1
+fi
 
 # =============================================================================
 # 第二轮测试：处理单独的gt_poses.csv文件

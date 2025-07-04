@@ -228,67 +228,67 @@ fi
 # =============================================================================
 # 第一轮测试：处理gt文件夹中的扰动文件（0-90度）
 # =============================================================================
-echo "========== 第一轮测试：角度扰动文件 =========="
-echo "🎯 测试目标: 处理 gt 文件夹中的 10 个扰动文件（0-90度）"
-echo "📂 扰动目录: ${PERTURBATION_DIR}"
-echo "📁 结果存储: 各角度子目录（angle_000 到 angle_090）"
-echo ""
+# echo "========== 第一轮测试：角度扰动文件 =========="
+# echo "🎯 测试目标: 处理 gt 文件夹中的 10 个扰动文件（0-90度）"
+# echo "📂 扰动目录: ${PERTURBATION_DIR}"
+# echo "📁 结果存储: 各角度子目录（angle_000 到 angle_090）"
+# echo ""
 
-# 第一轮测试的输出前缀
-TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
+# # 第一轮测试的输出前缀
+# TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
 
-# 运行第一轮测试
-echo "🚀 开始第一轮测试..."
-${PY3} test_pointlk.py \
-  -o ${TEST_OUTPUT_PREFIX_ROUND1} \
-  -i ${DATASET_PATH} \
-  -c ${CATEGORY_FILE} \
-  -l ${TEST_LOG} \
-  --dataset-type c3vd \
-  --num-points ${NUM_POINTS} \
-  --max-iter ${MAX_ITER} \
-  --delta ${DELTA} \
-  --device ${DEVICE} \
-  --max-samples ${MAX_SAMPLES_ROUND1} \
-  --pair-mode ${PAIR_MODE} \
-  ${REFERENCE_PARAM} \
-  --perturbation-dir ${PERTURBATION_DIR} \
-  --model-type pointnet \
-  --dim-k ${DIM_K} \
-  --symfn ${SYMFN} \
-  --pretrained ${POINTNET_MODEL} \
-  ${VOXELIZATION_PARAMS} \
-  ${VISUALIZE_PARAMS}
+# # 运行第一轮测试
+# echo "🚀 开始第一轮测试..."
+# ${PY3} test_pointlk.py \
+#   -o ${TEST_OUTPUT_PREFIX_ROUND1} \
+#   -i ${DATASET_PATH} \
+#   -c ${CATEGORY_FILE} \
+#   -l ${TEST_LOG} \
+#   --dataset-type c3vd \
+#   --num-points ${NUM_POINTS} \
+#   --max-iter ${MAX_ITER} \
+#   --delta ${DELTA} \
+#   --device ${DEVICE} \
+#   --max-samples ${MAX_SAMPLES_ROUND1} \
+#   --pair-mode ${PAIR_MODE} \
+#   ${REFERENCE_PARAM} \
+#   --perturbation-dir ${PERTURBATION_DIR} \
+#   --model-type pointnet \
+#   --dim-k ${DIM_K} \
+#   --symfn ${SYMFN} \
+#   --pretrained ${POINTNET_MODEL} \
+#   ${VOXELIZATION_PARAMS} \
+#   ${VISUALIZE_PARAMS}
 
-# 检查第一轮测试结果
-if [ $? -eq 0 ]; then
-    echo ""
-    echo "✅ 第一轮测试（角度扰动）完成!"
+# # 检查第一轮测试结果
+# if [ $? -eq 0 ]; then
+#     echo ""
+#     echo "✅ 第一轮测试（角度扰动）完成!"
     
-    # 统计第一轮结果
-    ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
-    echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
-    if [ ${ANGLE_DIRS} -gt 0 ]; then
-        echo "📋 角度目录列表:"
-        find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
-        if [ ${ANGLE_DIRS} -gt 5 ]; then
-            echo "   ... (共${ANGLE_DIRS}个角度目录)"
-        fi
-    fi
-else
-    echo ""
-    echo "❌ 第一轮测试（角度扰动）失败!"
-    echo "请检查错误日志: ${TEST_LOG}"
+#     # 统计第一轮结果
+#     ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
+#     echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
+#     if [ ${ANGLE_DIRS} -gt 0 ]; then
+#         echo "📋 角度目录列表:"
+#         find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
+#         if [ ${ANGLE_DIRS} -gt 5 ]; then
+#             echo "   ... (共${ANGLE_DIRS}个角度目录)"
+#         fi
+#     fi
+# else
+#     echo ""
+#     echo "❌ 第一轮测试（角度扰动）失败!"
+#     echo "请检查错误日志: ${TEST_LOG}"
     
-    # 显示最后几行错误信息
-    if [ -f "${TEST_LOG}" ]; then
-        echo ""
-        echo "📋 最新错误信息:"
-        tail -10 "${TEST_LOG}"
-    fi
+#     # 显示最后几行错误信息
+#     if [ -f "${TEST_LOG}" ]; then
+#         echo ""
+#         echo "📋 最新错误信息:"
+#         tail -10 "${TEST_LOG}"
+#     fi
     
-    exit 1
-fi
+#     exit 1
+# fi
 
 # =============================================================================
 # 第二轮测试：处理单独的gt_poses.csv文件
@@ -304,16 +304,9 @@ echo ""
 TEST_OUTPUT_PREFIX_ROUND2="${TEST_RESULTS_DIR}/gt/results"
 TEST_LOG_ROUND2="${TEST_RESULTS_DIR}/gt/test_log_gt_${DATE_TAG}.log"
 
-# 创建临时扰动目录用于第二轮测试
-TEMP_PERTURBATION_DIR="/tmp/gt_poses_temp_${DATE_TAG}"
-mkdir -p "${TEMP_PERTURBATION_DIR}"
-
-# 将gt_poses.csv复制到临时目录并重命名为pert_gt.csv
-cp "${GT_POSES_FILE}" "${TEMP_PERTURBATION_DIR}/pert_gt.csv"
-
 echo "🚀 开始第二轮测试..."
-echo "📂 临时扰动目录: ${TEMP_PERTURBATION_DIR}"
-echo "📄 扰动文件: pert_gt.csv"
+echo "📄 直接使用GT姿态文件: ${GT_POSES_FILE}"
+echo "🎯 GT_POSES模式将自动激活（每个扰动随机选择一个测试样本）"
 
 # 构建第二轮测试的MAX_SAMPLES参数
 MAX_SAMPLES_PARAM_ROUND2=""
@@ -321,7 +314,7 @@ if [ ${MAX_SAMPLES_ROUND2} -gt 0 ]; then
     MAX_SAMPLES_PARAM_ROUND2="--max-samples ${MAX_SAMPLES_ROUND2}"
 fi
 
-# 运行第二轮测试
+# 运行第二轮测试 - 直接使用GT姿态文件
 ${PY3} test_pointlk.py \
   -o ${TEST_OUTPUT_PREFIX_ROUND2} \
   -i ${DATASET_PATH} \
@@ -335,7 +328,7 @@ ${PY3} test_pointlk.py \
   ${MAX_SAMPLES_PARAM_ROUND2} \
   --pair-mode ${PAIR_MODE} \
   ${REFERENCE_PARAM} \
-  --perturbation-dir ${TEMP_PERTURBATION_DIR} \
+  --perturbation-file ${GT_POSES_FILE} \
   --model-type pointnet \
   --dim-k ${DIM_K} \
   --symfn ${SYMFN} \
@@ -367,16 +360,15 @@ else
         tail -10 "${TEST_LOG_ROUND2}"
     fi
     
-    # 清理临时目录
-    rm -rf "${TEMP_PERTURBATION_DIR}"
     exit 1
 fi
 
-# 清理临时目录
 echo ""
-echo "🧹 清理临时文件..."
-rm -rf "${TEMP_PERTURBATION_DIR}"
-echo "✅ 临时目录已清理: ${TEMP_PERTURBATION_DIR}"
+echo "🎯 GT_POSES模式测试说明:"
+echo "   - 直接使用了gt_poses.csv文件"
+echo "   - 系统自动检测到文件名包含'gt_poses'，启用随机选择模式"
+echo "   - 每个扰动随机选择一个测试样本进行测试"
+echo "   - 总测试次数等于扰动数量（而不是数据集大小）"
 
 # =============================================================================
 # 最终结果汇总

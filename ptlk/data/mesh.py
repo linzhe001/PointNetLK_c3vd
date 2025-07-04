@@ -6,6 +6,10 @@ from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import matplotlib.pyplot
 
+# 添加 PLY 读取支持
+from plyfile import PlyData
+import torch
+
 
 class Mesh:
     def __init__(self):
@@ -203,6 +207,20 @@ def objread(filepath, points_only=True):
     mesh._faces = _faces
 
     return mesh
+
+
+def plyread(file_path):
+    """从 PLY 文件读取点云数据"""
+    # 读取 PLY 顶点数据
+    ply_data = PlyData.read(file_path)
+    # 拼接 x,y,z 坐标
+    pc = numpy.vstack([
+        ply_data['vertex']['x'],
+        ply_data['vertex']['y'],
+        ply_data['vertex']['z']
+    ]).T
+    # 转换为 torch Tensor
+    return torch.from_numpy(pc.astype(numpy.float32))
 
 
 if __name__ == '__main__':

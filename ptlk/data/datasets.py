@@ -17,6 +17,12 @@ from . import transforms
 from .. import so3
 from .. import se3
 
+# 从mesh模块导入plyread函数
+try:
+    from .mesh import plyread
+except ImportError:
+    print("Warning: plyread not available from mesh module")
+
 # 添加体素化相关函数（从PointNetLK_com移植）
 def find_voxel_overlaps(p0, p1, voxel):
     """计算两个点云的重叠边界框和体素参数"""
@@ -136,6 +142,187 @@ class VoxelizationConfig:
         self.max_voxel_points = max_voxel_points
         self.max_voxels = max_voxels
         self.min_voxel_points_ratio = min_voxel_points_ratio
+
+
+def voxel_grid_centroid_downsample(points, voxel_size=0.05, target_points=None):
+    """
+    标准体素网格质心降采样 (Voxel Grid Centroid Downsampling)
+    这是最经典、最常用的体素降采样方法。
+    
+    工作原理：
+    1. 在整个点云空间上创建一个三维体素网格（Voxel Grid），网格大小由 voxel_size 参数决定。
+    2. 遍历所有点，将它们分配到各自所在的体素中。
+    3. 对于每一个包含一个或多个点的非空体素，计算体素内所有点的质心（平均坐标）。
+    4. 用这个计算出的质心点来代表该体素，作为降采样后的新点。
+    
+    Args:
+        points: 输入点云 (numpy array, shape: [N, 3])
+        voxel_size: 体素大小
+        target_points: 目标点数（如果设置，会通过调整体素大小来尽量达到目标点数）
+    
+    Returns:
+        downsampled_points: 降采样后的点云 (numpy array, shape: [M, 3])
+    """
+    if len(points) == 0:
+        return np.array([]).reshape(0, 3)
+    
+    # 如果指定了目标点数，尝试自动调整体素大小
+    if target_points is not None and target_points > 0:
+        # 估算合适的体素大小以达到目标点数
+        bbox_size = np.max(points, axis=0) - np.min(points, axis=0)
+        volume = np.prod(bbox_size)
+        
+        # 根据点云密度估算体素大小
+        # 假设目标是将点云降采样到目标点数
+        estimated_voxel_volume = volume / target_points
+        estimated_voxel_size = np.cbrt(estimated_voxel_volume)
+        
+        # 限制体素大小的范围，避免过大或过小
+        voxel_size = np.clip(estimated_voxel_size, voxel_size * 0.1, voxel_size * 10)
+    
+    # 计算点云的边界框
+    min_bound = np.min(points, axis=0)
+    max_bound = np.max(points, axis=0)
+    
+    # 计算每个点对应的体素索引
+    voxel_indices = np.floor((points - min_bound) / voxel_size).astype(np.int32)
+    
+    # 创建体素索引的唯一标识符
+    # 使用字典存储每个体素中的点
+    voxel_dict = {}
+    
+    for i, voxel_idx in enumerate(voxel_indices):
+        # 将体素索引转换为唯一的键
+        key = tuple(voxel_idx)
+        
+        if key not in voxel_dict:
+            voxel_dict[key] = []
+        voxel_dict[key].append(points[i])
+    
+    # 计算每个非空体素的质心
+    centroids = []
+    for voxel_points in voxel_dict.values():
+        if len(voxel_points) > 0:
+            # 计算体素内所有点的质心（平均坐标）
+            centroid = np.mean(voxel_points, axis=0)
+            centroids.append(centroid)
+    
+    if len(centroids) == 0:
+        # 如果没有有效的体素，返回原始点云的第一个点
+        return points[:1] if len(points) > 0 else np.array([]).reshape(0, 3)
+    
+    downsampled_points = np.array(centroids)
+    
+    # 如果指定了目标点数且降采样后的点数不足，进行补充
+    if target_points is not None and len(downsampled_points) < target_points:
+        # 使用随机重复采样补足
+        shortage = target_points - len(downsampled_points)
+        if shortage > 0:
+            indices = np.random.choice(len(downsampled_points), shortage, replace=True)
+            repeated_points = downsampled_points[indices]
+            downsampled_points = np.concatenate([downsampled_points, repeated_points], axis=0)
+    elif target_points is not None and len(downsampled_points) > target_points:
+        # 如果点数过多，随机选择目标数量的点
+        indices = np.random.choice(len(downsampled_points), target_points, replace=False)
+        downsampled_points = downsampled_points[indices]
+    
+    return downsampled_points
+
+
+def adaptive_voxel_grid_downsample(points, target_points, initial_voxel_size=0.05, max_iterations=10):
+    """
+    自适应体素网格降采样，自动调整体素大小以达到目标点数
+    
+    Args:
+        points: 输入点云
+        target_points: 目标点数
+        initial_voxel_size: 初始体素大小
+        max_iterations: 最大迭代次数
+    
+    Returns:
+        降采样后的点云
+    """
+    if len(points) <= target_points:
+        return points
+    
+    voxel_size = initial_voxel_size
+    
+    for iteration in range(max_iterations):
+        # 尝试当前体素大小
+        downsampled = voxel_grid_centroid_downsample(points, voxel_size=voxel_size)
+        current_count = len(downsampled)
+        
+        # 如果点数接近目标（误差在20%以内），则接受结果
+        if abs(current_count - target_points) / target_points <= 0.2:
+            # 如果点数不足，补充到目标点数
+            if current_count < target_points:
+                shortage = target_points - current_count
+                indices = np.random.choice(current_count, shortage, replace=True)
+                repeated_points = downsampled[indices]
+                downsampled = np.concatenate([downsampled, repeated_points], axis=0)
+            elif current_count > target_points:
+                # 如果点数过多，随机选择
+                indices = np.random.choice(current_count, target_points, replace=False)
+                downsampled = downsampled[indices]
+            
+            return downsampled
+        
+        # 调整体素大小
+        if current_count > target_points:
+            # 点数太多，增大体素大小
+            voxel_size *= 1.5
+        else:
+            # 点数太少，减小体素大小
+            voxel_size *= 0.7
+        
+        # 避免体素大小过小或过大
+        voxel_size = np.clip(voxel_size, 0.001, 1.0)
+    
+    # 如果迭代结束仍未达到理想效果，使用最后一次的结果并补充到目标点数
+    final_downsampled = voxel_grid_centroid_downsample(points, voxel_size=voxel_size)
+    if len(final_downsampled) < target_points:
+        shortage = target_points - len(final_downsampled)
+        indices = np.random.choice(len(final_downsampled), shortage, replace=True)
+        repeated_points = final_downsampled[indices]
+        final_downsampled = np.concatenate([final_downsampled, repeated_points], axis=0)
+    elif len(final_downsampled) > target_points:
+        indices = np.random.choice(len(final_downsampled), target_points, replace=False)
+        final_downsampled = final_downsampled[indices]
+    
+    return final_downsampled
+
+
+def joint_normalization(source_tensor, target_tensor):
+    """
+    对源点云和目标点云进行联合归一化
+    使用相同的中心点和缩放因子，保持两个点云之间的相对空间关系
+    
+    Args:
+        source_tensor: 源点云 (torch.Tensor, shape: [N, 3])
+        target_tensor: 目标点云 (torch.Tensor, shape: [M, 3])
+    
+    Returns:
+        source_normalized, target_normalized: 联合归一化后的点云
+    """
+    # 合并两个点云来计算联合的边界框
+    combined_points = torch.cat([source_tensor, target_tensor], dim=0)
+    
+    # 计算联合的最小值和最大值
+    combined_min_vals = combined_points.min(dim=0)[0]
+    combined_max_vals = combined_points.max(dim=0)[0]
+    
+    # 计算联合的中心点和缩放因子
+    combined_center = (combined_min_vals + combined_max_vals) / 2
+    combined_scale = (combined_max_vals - combined_min_vals).max()
+    
+    if combined_scale < 1e-10:
+        raise ValueError(f"联合归一化尺度过小: {combined_scale}")
+    
+    # 使用相同的中心点和缩放因子对两个点云进行归一化
+    source_normalized = (source_tensor - combined_center) / combined_scale
+    target_normalized = (target_tensor - combined_center) / combined_scale
+    
+    return source_normalized, target_normalized
 
 
 def voxelize_point_clouds(source_points, target_points, num_points, voxel_config=None, 
@@ -491,12 +678,48 @@ class CADset4tracking_fixed_perturbation_random_sample(torch.utils.data.Dataset)
     Each perturbation randomly selects a test sample, testing perturbation count times total
     """
     def __init__(self, dataset, perturbation, source_modifier=None, template_modifier=None,
-                 fmt_trans=False, random_seed=42):
+                 fmt_trans=False, random_seed=42, num_points=1024, use_voxelization=True, voxel_config=None):
         self.dataset = dataset
         self.perturbation = numpy.array(perturbation) # twist (perturbation_count, 6)
         self.source_modifier = source_modifier
         self.template_modifier = template_modifier
         self.fmt_trans = fmt_trans # twist or (rotation and translation)
+        
+        # 添加降采样相关属性
+        self.num_points = num_points
+        self.use_voxelization = use_voxelization
+        
+        # 设置体素化配置
+        if voxel_config is None:
+            self.voxel_config = VoxelizationConfig(
+                voxel_size=0.05,
+                voxel_grid_size=32,
+                max_voxel_points=100,
+                max_voxels=20000,
+                min_voxel_points_ratio=0.1
+            )
+        else:
+            self.voxel_config = voxel_config
+        
+        # 保留原有的重采样器作为后备
+        self.resampler = transforms.Resampler(num_points)
+        
+        # 保存文件索引和点云对信息的字典
+        self.cloud_info = {}
+        
+        # 收集所有可能的点云对信息
+        if hasattr(dataset, 'pairs'):
+            # 如果是C3VDDataset，直接使用其pair属性
+            self.original_pairs = dataset.pairs
+            self.original_pair_scenes = dataset.pair_scenes if hasattr(dataset, 'pair_scenes') else None
+        elif hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'pairs'):
+            # 如果是Subset，访问其底层dataset
+            self.original_pairs = dataset.dataset.pairs
+            self.original_pair_scenes = dataset.dataset.pair_scenes if hasattr(dataset.dataset, 'pair_scenes') else None
+        else:
+            print("Warning: Unable to find original point cloud pair information")
+            self.original_pairs = None
+            self.original_pair_scenes = None
         
         # 设置随机种子以确保可复现性
         # Set random seed for reproducibility
@@ -511,6 +734,8 @@ class CADset4tracking_fixed_perturbation_random_sample(torch.utils.data.Dataset)
         print(f"- Total perturbations: {len(self.perturbation)}")
         print(f"- Dataset size: {len(self.dataset)}")
         print(f"- Random seed: {random_seed}")
+        print(f"- Target points: {num_points}")
+        print(f"- 降采样方法: {'复杂体素化处理' if use_voxelization else '标准体素网格质心降采样'}")
 
     def do_transform(self, p0, x):
         # p0: [N, 3]
@@ -541,712 +766,6 @@ class CADset4tracking_fixed_perturbation_random_sample(torch.utils.data.Dataset)
     def __getitem__(self, index):
         # index是扰动索引 (0 到 len(perturbation)-1)
         # index is perturbation index (0 to len(perturbation)-1)
-        twist = torch.from_numpy(numpy.array(self.perturbation[index])).contiguous().view(1, 6)
-        
-        # 使用预先生成的随机样本索引
-        # Use pre-generated random sample index
-        sample_idx = self.sample_indices[index]
-        pm, _ = self.dataset[sample_idx]
-        
-        x = twist.to(pm)
-        if self.source_modifier is not None:
-            p_ = self.source_modifier(pm)
-            p1, igt = self.do_transform(p_, x)
-        else:
-            p1, igt = self.do_transform(pm, x)
-
-        if self.template_modifier is not None:
-            p0 = self.template_modifier(pm)
-        else:
-            p0 = pm
-
-        # p0: template, p1: source, igt: transform matrix from p0 to p1
-        return p0, p1, igt
-
-
-def plyread(file_path):
-    """Read point cloud from PLY file"""
-    ply_data = PlyData.read(file_path)
-    pc = np.vstack([
-        ply_data['vertex']['x'],
-        ply_data['vertex']['y'],
-        ply_data['vertex']['z']
-    ]).T
-    return torch.from_numpy(pc.astype(np.float32))
-
-class C3VDDataset(torch.utils.data.Dataset):
-    """C3VD dataset loader that handles pairs of source and target point clouds."""
-    def __init__(self, source_root, target_root=None, transform=None, pair_mode='one_to_one', reference_name=None, use_prefix=False):
-        """
-        Args:
-            source_root (str): 源点云根目录 (C3VD_ply_source)
-            target_root (str, optional): 目标点云根目录。如果为None，会根据pair_mode自动设置
-            transform: 点云变换
-            pair_mode (str): 配对模式，可选值如下:
-                - 'one_to_one': 每个源点云对应一个特定的目标点云 (原有模式)
-                - 'scene_reference': 每个场景使用一个共享的目标点云 (原有模式)
-                - 'source_to_source': 源点云和源点云之间的配对 (数据增强)
-                - 'target_to_target': 目标点云和目标点云之间的配对 (数据增强)
-                - 'all': 包含所有配对方式 (完整数据增强)
-            reference_name (str, optional): 场景参考模式下目标点云的名称，若为None则使用场景中的第一个点云
-            use_prefix (bool): 是否使用场景名称前缀（第一个下划线前的部分）作为类别
-        """
-        self.source_root = source_root
-        self.pair_mode = pair_mode
-        self.reference_name = reference_name
-        self.use_prefix = use_prefix
-        
-        # 根据配对模式设置目标点云路径
-        if target_root is None:
-            if pair_mode == 'scene_reference':
-                # 场景参考模式使用 C3VD_ref 目录
-                base_dir = os.path.dirname(source_root)
-                self.target_root = os.path.join(base_dir, 'C3VD_ref')
-            else:
-                # 其他模式使用 visible_point_cloud_ply_depth 目录
-                base_dir = os.path.dirname(source_root)
-                self.target_root = os.path.join(base_dir, 'visible_point_cloud_ply_depth')
-        else:
-            self.target_root = target_root
-            
-        print(f"\n====== C3VD Dataset Configuration ======")
-        print(f"Pairing Mode: {pair_mode}")
-        print(f"Source Directory: {self.source_root}")
-        print(f"Target Directory: {self.target_root}")
-        
-        self.transform = transform
-        
-        # Get point cloud size from transform if available
-        self.num_points = 1024  # Default value
-        if transform and hasattr(transform, 'transforms'):
-            for t in transform.transforms:
-                if hasattr(t, 'num_points'):
-                    self.num_points = t.num_points
-                    break
-        
-        # Get scene folders
-        self.scenes = []
-        self.scene_prefixes = {}  # 映射场景到前缀
-        for scene_dir in glob.glob(os.path.join(source_root, "*")):
-            if os.path.isdir(scene_dir):
-                scene_name = os.path.basename(scene_dir)
-                self.scenes.append(scene_name)
-                
-                # 提取场景前缀（第一个下划线前的部分）
-                if self.use_prefix:
-                    prefix = scene_name.split('_')[0]
-                    self.scene_prefixes[scene_name] = prefix
-        
-        # Get point cloud pairs for each scene
-        self.pairs = []
-        self.pair_scenes = []  # Added: track the scene for each point cloud pair
-        
-        # 如果是数据增强模式，用于记录每个配对的类型
-        if pair_mode == 'all':
-            self.pair_types = []
-            
-        # 获取每个场景中的所有点云文件（用于数据增强模式）
-        self.scene_source_files = {}
-        self.scene_target_files = {}
-        
-        for scene in self.scenes:
-            # 获取场景中的所有源点云
-            source_files = glob.glob(os.path.join(source_root, scene, "????_depth_pcd.ply"))
-            self.scene_source_files[scene] = sorted(source_files)
-            
-            # 获取场景中的所有目标点云
-            target_files = glob.glob(os.path.join(self.target_root, scene, "frame_????_visible.ply"))
-            self.scene_target_files[scene] = sorted(target_files)
-        
-        # 根据配对模式创建点云对
-        if pair_mode == 'one_to_one' or pair_mode == 'all':
-            # 处理原有的one_to_one模式
-            self._create_one_to_one_pairs()
-            
-        elif pair_mode == 'scene_reference':
-            # 处理原有的scene_reference模式
-            self._create_scene_reference_pairs()
-            
-        elif pair_mode == 'source_to_source':
-            # 新增：源点云之间配对
-            self._create_source_to_source_pairs()
-            
-        elif pair_mode == 'target_to_target':
-            # 新增：目标点云之间配对
-            self._create_target_to_target_pairs()
-        
-        # 如果是all模式，需要创建所有配对
-        if pair_mode == 'all':
-            # 已经创建了one_to_one配对，再添加其他配对
-            self._create_scene_reference_pairs()
-            self._create_source_to_source_pairs()
-            self._create_target_to_target_pairs()
-            
-            # 打印各类配对数量
-            source_target_one_to_one_count = sum(1 for i, t in enumerate(self.pair_types) if t == 'one_to_one')
-            source_target_reference_count = sum(1 for i, t in enumerate(self.pair_types) if t == 'scene_reference')
-            source_source_count = sum(1 for i, t in enumerate(self.pair_types) if t == 'source_to_source')
-            target_target_count = sum(1 for i, t in enumerate(self.pair_types) if t == 'target_to_target')
-            
-            print(f"- Source-to-Target pairs (one_to_one): {source_target_one_to_one_count}")
-            print(f"- Source-to-Reference pairs: {source_target_reference_count}")
-            print(f"- Source-to-Source pairs: {source_source_count}")
-            print(f"- Target-to-Target pairs: {target_target_count}")
-        
-        print(f"Total point cloud pairs loaded: {len(self.pairs)}")
-    
-    def _create_one_to_one_pairs(self):
-        """创建源点云到目标点云的一一对应配对"""
-        pair_count = 0
-        
-        for scene in self.scenes:
-            source_files = self.scene_source_files.get(scene, [])
-            
-            for source_file in source_files:
-                # 从源点云文件名提取序号
-                basename = os.path.basename(source_file)
-                frame_idx = basename[:4]  # 提取文件名前4位数字作为序号
-                
-                # 构建对应的目标点云文件名
-                target_file = os.path.join(self.target_root, scene, f"frame_{frame_idx}_visible.ply")
-                
-                # 确认目标点云文件存在
-                if os.path.exists(target_file):
-                    self.pairs.append((source_file, target_file))
-                    self.pair_scenes.append(scene)
-                    
-                    # 记录配对类型（如果是all模式）
-                    if hasattr(self, 'pair_types'):
-                        self.pair_types.append('one_to_one')
-                    
-                    pair_count += 1
-        
-        if pair_count > 0:
-            print(f"Source-to-Target pairs: {pair_count}")
-    
-    def _create_scene_reference_pairs(self):
-        """创建源点云到参考目标点云的配对"""
-        pair_count = 0
-        
-        for scene in self.scenes:
-            source_files = self.scene_source_files.get(scene, [])
-            
-            # 找出参考点云
-            if self.reference_name:
-                # 使用指定的参考点云名称
-                reference_file = os.path.join(self.target_root, scene, self.reference_name)
-            else:
-                # 使用第一个目标点云作为参考
-                target_files = self.scene_target_files.get(scene, [])
-                if not target_files:
-                    print(f"Warning: No target point clouds found for scene {scene}, skipping")
-                    continue
-                reference_file = target_files[0]  # 已排序，取第一个
-            
-            # 确认参考点云文件存在
-            if os.path.exists(reference_file):
-                # 每个源点云都对应同一个参考点云
-                for source_file in source_files:
-                    # 如果是all模式，避免重复添加已有的配对
-                    if self.pair_mode == 'all':
-                        # 检查这个配对是否已经在one_to_one模式中添加过了
-                        basename = os.path.basename(source_file)
-                        frame_idx = basename[:4]
-                        target_name = f"frame_{frame_idx}_visible.ply"
-                        
-                        # 如果参考点云恰好是对应的目标点云，就跳过
-                        if os.path.basename(reference_file) == target_name:
-                            continue
-                    
-                    self.pairs.append((source_file, reference_file))
-                    self.pair_scenes.append(scene)
-                    
-                    # 记录配对类型（如果是all模式）
-                    if hasattr(self, 'pair_types'):
-                        self.pair_types.append('scene_reference')
-                    
-                    pair_count += 1
-            else:
-                print(f"Warning: Reference point cloud {reference_file} for scene {scene} does not exist, skipping")
-        
-        if pair_count > 0:
-            print(f"Source-to-Reference pairs: {pair_count}")
-    
-    def _create_source_to_source_pairs(self):
-        """创建源点云到源点云的配对（数据增强）"""
-        pair_count = 0
-        
-        for scene in self.scenes:
-            source_files = self.scene_source_files.get(scene, [])
-            
-            # 需要至少两个源点云文件才能配对
-            if len(source_files) < 2:
-                continue
-            
-            # 配对相邻帧的源点云
-            for i in range(len(source_files) - 1):
-                source_file1 = source_files[i]
-                source_file2 = source_files[i + 1]
-                
-                self.pairs.append((source_file1, source_file2))
-                self.pair_scenes.append(scene)
-                
-                # 记录配对类型（如果是all模式）
-                if hasattr(self, 'pair_types'):
-                    self.pair_types.append('source_to_source')
-                
-                pair_count += 1
-        
-        if pair_count > 0:
-            print(f"Source-to-Source pairs: {pair_count}")
-    
-    def _create_target_to_target_pairs(self):
-        """创建目标点云到目标点云的配对（数据增强）"""
-        pair_count = 0
-        
-        for scene in self.scenes:
-            target_files = self.scene_target_files.get(scene, [])
-            
-            # 需要至少两个目标点云文件才能配对
-            if len(target_files) < 2:
-                continue
-            
-            # 配对相邻帧的目标点云
-            for i in range(len(target_files) - 1):
-                target_file1 = target_files[i]
-                target_file2 = target_files[i + 1]
-                
-                self.pairs.append((target_file1, target_file2))
-                self.pair_scenes.append(scene)
-                
-                # 记录配对类型（如果是all模式）
-                if hasattr(self, 'pair_types'):
-                    self.pair_types.append('target_to_target')
-                
-                pair_count += 1
-        
-        if pair_count > 0:
-            print(f"Target-to-Target pairs: {pair_count}")
-    
-    def get_scene_indices(self, scene_names):
-        """获取指定场景的样本索引"""
-        indices = []
-        
-        # 检查pair_scenes属性是否存在
-        if not hasattr(self, 'pair_scenes') or not self.pair_scenes:
-            print(f"警告: 没有pair_scenes属性，尝试从文件路径提取场景信息")
-            # 从文件路径提取场景信息
-        else:
-            # 正常使用pair_scenes
-            for i, scene in enumerate(self.pair_scenes):
-                if scene in scene_names:
-                    indices.append(i)
-        
-        print(f"找到 {len(indices)} 个属于指定场景的样本")
-        return indices
-
-    def __len__(self):
-        return len(self.pairs)
-    
-    def __getitem__(self, idx):
-        source_file, target_file = self.pairs[idx]
-        
-        # Read source and target point clouds
-        source = plyread(source_file)
-        target = plyread(target_file)
-        
-        # Check point cloud validity
-        if not torch.isfinite(source).all() or not torch.isfinite(target).all():
-            raise ValueError(f"Point cloud at index {idx} contains invalid values")
-        
-        # Ensure point clouds are not empty
-        if source.shape[0] == 0 or target.shape[0] == 0:
-            raise ValueError(f"Point cloud at index {idx} is empty")
-        
-        # Apply transformations
-        if self.transform:
-            source = self.transform(source)
-            target = self.transform(target)
-        
-        # 创建一个默认的4x4单位矩阵作为变换矩阵，而不是返回None
-        igt = torch.eye(4)
-        
-        return source, target, igt
-
-class C3VDset4tracking(torch.utils.data.Dataset):
-    """C3VD配准跟踪数据集，支持体素化预处理和刚性变换"""
-    
-    def __init__(self, dataset, rigid_transform, num_points=1024, use_voxelization=True, voxel_config=None):
-        """
-        Args:
-            dataset: C3VD基础数据集
-            rigid_transform: 刚性变换生成器
-            num_points: 目标点云点数
-            use_voxelization: 是否使用体素化处理
-            voxel_config: 体素化配置，如果为None则使用默认配置
-        """
-        self.dataset = dataset
-        self.rigid_transform = rigid_transform
-        self.num_points = num_points
-        self.use_voxelization = use_voxelization
-        
-        # 设置体素化配置
-        if voxel_config is None:
-            self.voxel_config = VoxelizationConfig(
-                voxel_size=0.05,
-                voxel_grid_size=32,
-                max_voxel_points=100,
-                max_voxels=20000,
-                min_voxel_points_ratio=0.1
-            )
-        else:
-            self.voxel_config = voxel_config
-        
-        # 保留原有的重采样器作为后备
-        self.resampler = transforms.Resampler(num_points)
-        
-        print(f"C3VDset4tracking初始化:")
-        print(f"  目标点数: {num_points}")
-        print(f"  体素化处理: {'启用' if use_voxelization else '禁用'}")
-        if use_voxelization:
-            print(f"  体素化配置: 网格大小={self.voxel_config.voxel_grid_size}, 体素大小={self.voxel_config.voxel_size}")
-        
-    def __len__(self):
-        return len(self.dataset)
-        
-    def __getitem__(self, idx):
-        try:
-            # 获取原始点云对
-            source, target, _ = self.dataset[idx]  # 忽略原始的igt
-            
-            # 转换为numpy数组进行处理
-            source_np = source.numpy() if isinstance(source, torch.Tensor) else source
-            target_np = target.numpy() if isinstance(target, torch.Tensor) else target
-            
-            # 数据清理：移除无效点
-            source_mask = np.isfinite(source_np).all(axis=1)
-            target_mask = np.isfinite(target_np).all(axis=1)
-            
-            source_clean = source_np[source_mask]
-            target_clean = target_np[target_mask]
-            
-            if len(source_clean) < 100 or len(target_clean) < 100:
-                raise ValueError(f"点云在索引{idx}处清理后点数不足100个")
-            
-            # 选择处理策略：体素化 vs 简单重采样
-            if self.use_voxelization:
-                try:
-                    # 使用体素化处理
-                    processed_source, processed_target = voxelize_point_clouds(
-                        source_clean, target_clean, self.num_points, 
-                        self.voxel_config, fallback_to_sampling=True
-                    )
-                except Exception as e:
-                    print(f"体素化处理失败，回退到重采样: {e}")
-                    # 转换回torch tensor用于重采样
-                    source_tensor = torch.from_numpy(source_clean).float()
-                    target_tensor = torch.from_numpy(target_clean).float()
-                    processed_source = self.resampler(source_tensor).numpy()
-                    processed_target = self.resampler(target_tensor).numpy()
-            else:
-                # 使用简单重采样
-                source_tensor = torch.from_numpy(source_clean).float()
-                target_tensor = torch.from_numpy(target_clean).float()
-                processed_source = self.resampler(source_tensor).numpy()
-                processed_target = self.resampler(target_tensor).numpy()
-            
-            # 转换回torch tensor
-            source_tensor = torch.from_numpy(processed_source).float()
-            target_tensor = torch.from_numpy(processed_target).float()
-            
-            # 分别归一化：对每个点云单独进行归一化，配合体素化预处理的裁剪操作
-            # 源点云归一化
-            source_min_vals = source_tensor.min(dim=0)[0]
-            source_max_vals = source_tensor.max(dim=0)[0]
-            source_center = (source_min_vals + source_max_vals) / 2
-            source_scale = (source_max_vals - source_min_vals).max()
-            
-            if source_scale < 1e-10:
-                raise ValueError(f"源点云归一化尺度过小，索引{idx}: {source_scale}")
-            
-            source_normalized = (source_tensor - source_center) / source_scale
-            
-            # 目标点云归一化
-            target_min_vals = target_tensor.min(dim=0)[0]
-            target_max_vals = target_tensor.max(dim=0)[0]
-            target_center = (target_min_vals + target_max_vals) / 2
-            target_scale = (target_max_vals - target_min_vals).max()
-            
-            if target_scale < 1e-10:
-                raise ValueError(f"目标点云归一化尺度过小，索引{idx}: {target_scale}")
-                
-            target_normalized = (target_tensor - target_center) / target_scale
-            
-            # 应用随机刚性变换
-            # target作为模板，source经过变换后作为源点云
-            transformed_source = self.rigid_transform(source_normalized)
-            igt = self.rigid_transform.igt  # 获取真实的变换矩阵
-            
-            # 返回：模板、变换后的源、变换矩阵
-            return target_normalized, transformed_source, igt
-            
-        except Exception as e:
-            print(f"处理索引{idx}的点云时出错: {str(e)}")
-            raise
-
-class C3VDset4tracking_test(C3VDset4tracking):
-    """用于测试的C3VD跟踪数据集，保留原始点云引用和文件路径
-    
-    此类扩展了C3VDset4tracking类，添加了以下功能：
-    1. 保留原始点云数据的引用和文件路径
-    2. 为每个点云对创建唯一索引，方便后续引用
-    3. 提供获取原始未变换点云的方法
-    """
-    def __init__(self, dataset, rigid_transform, num_points=1024, 
-                 use_voxelization=True, voxel_config=None):
-        """
-        Args:
-            dataset: C3VD基础数据集
-            rigid_transform: 刚性变换生成器
-            num_points: 目标点云点数
-            use_voxelization: 是否使用体素化处理
-            voxel_config: 体素化配置
-        """
-        # 调用父类构造函数
-        super().__init__(dataset, rigid_transform, num_points, use_voxelization, voxel_config)
-        
-        # 保存文件索引和点云对信息的字典
-        self.cloud_info = {}
-        
-        # 收集所有可能的点云对信息
-        if hasattr(dataset, 'pairs'):
-            # 如果是C3VDDataset，直接使用其pair属性
-            self.original_pairs = dataset.pairs
-            self.original_pair_scenes = dataset.pair_scenes if hasattr(dataset, 'pair_scenes') else None
-        elif hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'pairs'):
-            # 如果是Subset，访问其底层dataset
-            self.original_pairs = dataset.dataset.pairs
-            self.original_pair_scenes = dataset.dataset.pair_scenes if hasattr(dataset.dataset, 'pair_scenes') else None
-        else:
-            print("Warning: Unable to find original point cloud pair information")
-            self.original_pairs = None
-            self.original_pair_scenes = None
-    
-    def __getitem__(self, index):
-        """获取测试数据项，同时保存原始点云信息"""
-        try:
-            # 获取原始点云对
-            source, target, _ = self.dataset[index]  # 忽略原始的igt
-            
-            # 转换为numpy数组进行处理
-            source_np = source.numpy() if isinstance(source, torch.Tensor) else source
-            target_np = target.numpy() if isinstance(target, torch.Tensor) else target
-            
-            # 数据清理：移除无效点
-            source_mask = np.isfinite(source_np).all(axis=1)
-            target_mask = np.isfinite(target_np).all(axis=1)
-            
-            source_clean = source_np[source_mask]
-            target_clean = target_np[target_mask]
-            
-            if len(source_clean) < 100 or len(target_clean) < 100:
-                raise ValueError(f"点云在索引{index}处清理后点数不足100个")
-            
-            # 选择处理策略：体素化 vs 简单重采样
-            if self.use_voxelization:
-                try:
-                    # 使用体素化处理
-                    processed_source, processed_target = voxelize_point_clouds(
-                        source_clean, target_clean, self.num_points, 
-                        self.voxel_config, fallback_to_sampling=True
-                    )
-                except Exception as e:
-                    print(f"体素化处理失败，回退到重采样: {e}")
-                    # 转换回torch tensor用于重采样
-                    source_tensor = torch.from_numpy(source_clean).float()
-                    target_tensor = torch.from_numpy(target_clean).float()
-                    processed_source = self.resampler(source_tensor).numpy()
-                    processed_target = self.resampler(target_tensor).numpy()
-            else:
-                # 使用简单重采样
-                source_tensor = torch.from_numpy(source_clean).float()
-                target_tensor = torch.from_numpy(target_clean).float()
-                processed_source = self.resampler(source_tensor).numpy()
-                processed_target = self.resampler(target_tensor).numpy()
-            
-            # 转换回torch tensor
-            source_tensor = torch.from_numpy(processed_source).float()
-            target_tensor = torch.from_numpy(processed_target).float()
-            
-            # 分别归一化：对每个点云单独进行归一化，配合体素化预处理的裁剪操作
-            # 源点云归一化
-            source_min_vals = source_tensor.min(dim=0)[0]
-            source_max_vals = source_tensor.max(dim=0)[0]
-            source_center = (source_min_vals + source_max_vals) / 2
-            source_scale = (source_max_vals - source_min_vals).max()
-            
-            if source_scale < 1e-10:
-                raise ValueError(f"源点云归一化尺度过小，索引{index}: {source_scale}")
-            
-            source_normalized = (source_tensor - source_center) / source_scale
-            
-            # 目标点云归一化
-            target_min_vals = target_tensor.min(dim=0)[0]
-            target_max_vals = target_tensor.max(dim=0)[0]
-            target_center = (target_min_vals + target_max_vals) / 2
-            target_scale = (target_max_vals - target_min_vals).max()
-            
-            if target_scale < 1e-10:
-                raise ValueError(f"目标点云归一化尺度过小，索引{index}: {target_scale}")
-            
-            target_normalized = (target_tensor - target_center) / target_scale
-            
-            # 应用随机刚性变换
-            # target作为模板，source经过变换后作为源点云
-            transformed_source = self.rigid_transform(source_normalized)
-            igt = self.rigid_transform.igt  # 获取真实的变换矩阵
-            
-            # 收集原始点云信息
-            # 尝试获取原始点云文件路径
-            if hasattr(self.dataset, 'indices') and self.original_pairs:
-                # 如果是子集，需要映射索引
-                orig_index = self.dataset.indices[index]
-                source_file, target_file = self.original_pairs[orig_index]
-                scene = self.original_pair_scenes[orig_index] if self.original_pair_scenes else "unknown"
-            elif self.original_pairs and index < len(self.original_pairs):
-                # 直接使用索引
-                source_file, target_file = self.original_pairs[index]
-                scene = self.original_pair_scenes[index] if self.original_pair_scenes else "unknown"
-            else:
-                source_file = None
-                target_file = None
-                scene = "unknown"
-            
-            # 尝试提取场景名称和序列号
-            scene_name = scene
-            source_seq = "0000"
-            
-            if source_file:
-                try:
-                    # 标准化路径分隔符
-                    norm_path = source_file.replace('\\', '/')
-                    
-                    # 如果未能从数据集获取场景名称，则从路径中提取
-                    if scene_name == "unknown" and 'C3VD_ply_source' in norm_path:
-                        # 查找C3VD_ply_source之后的第一个目录
-                        parts = norm_path.split('/')
-                        idx = [i for i, part in enumerate(parts) if part == 'C3VD_ply_source']
-                        if idx and idx[0] + 1 < len(parts):
-                            scene_name = parts[idx[0] + 1]
-                    
-                    # 提取源序号
-                    basename = os.path.basename(source_file)
-                    
-                    # 假设源文件名格式为 "XXXX_depth_pcd.ply"
-                    if basename.endswith("_depth_pcd.ply") and basename[:4].isdigit():
-                        source_seq = basename[:4]
-                    else:
-                        # 尝试从文件名中提取数字序列
-                        import re
-                        numbers = re.findall(r'\d+', basename)
-                        if numbers:
-                            source_seq = numbers[0].zfill(4)
-                except Exception as e:
-                    print(f"Warning: Error extracting scene name: {str(e)}")
-            
-            # 创建唯一标识符
-            identifier = f"{scene_name}_{source_seq}"
-            
-            # 保存点云信息
-            self.cloud_info[index] = {
-                'identifier': identifier,
-                'scene': scene_name,
-                'sequence': source_seq,
-                'source_file': source_file,
-                'target_file': target_file,
-                'original_source': source_normalized.clone(),
-                'original_target': target_normalized.clone(),
-                'igt': igt.clone() if igt is not None else None
-            }
-            
-            # 返回：模板、变换后的源、变换矩阵
-            return target_normalized, transformed_source, igt
-            
-        except Exception as e:
-            print(f"处理索引{index}的点云时出错: {str(e)}")
-            raise
-    
-    def get_cloud_info(self, index):
-        """获取指定索引的点云信息"""
-        return self.cloud_info.get(index, {})
-    
-    def get_original_clouds(self, index):
-        """获取指定索引的原始点云对"""
-        info = self.cloud_info.get(index, {})
-        return info.get('original_source'), info.get('original_target')
-    
-    def get_identifier(self, index):
-        """获取指定索引的点云标识符"""
-        info = self.cloud_info.get(index, {})
-        return info.get('identifier', f"unknown_{index:04d}")
-
-class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
-    """
-    专用于gt_poses.csv文件的C3VD测试数据集类
-    每个扰动随机选择一个测试样本，总共测试扰动数量次
-    Special C3VD test dataset class for gt_poses.csv files
-    Each perturbation randomly selects a test sample, testing perturbation count times total
-    """
-    def __init__(self, dataset, rigid_transform, num_points=1024, 
-                 use_voxelization=True, voxel_config=None, random_seed=42):
-        """
-        Args:
-            dataset: C3VD基础数据集
-            rigid_transform: 刚性变换生成器（包含所有扰动）
-            num_points: 目标点云点数
-            use_voxelization: 是否使用体素化处理
-            voxel_config: 体素化配置
-            random_seed: 随机种子
-        """
-        # 调用父类构造函数
-        super().__init__(dataset, rigid_transform, num_points, use_voxelization, voxel_config)
-        
-        # 检查是否有扰动数据
-        if not hasattr(rigid_transform, 'perturbations'):
-            raise ValueError("rigid_transform must have perturbations attribute for random sampling mode")
-        
-        self.perturbations = rigid_transform.perturbations
-        self.original_dataset_size = len(dataset)
-        
-        # 设置随机种子以确保可复现性
-        # Set random seed for reproducibility
-        self.random_seed = random_seed
-        numpy.random.seed(random_seed)
-        torch.manual_seed(random_seed)
-        
-        # 为每个扰动预先生成随机样本索引
-        # Pre-generate random sample indices for each perturbation
-        self.sample_indices = numpy.random.randint(0, self.original_dataset_size, size=len(self.perturbations))
-        
-        print(f"C3VD Random sampling mode activated for gt_poses.csv:")
-        print(f"- Total perturbations: {len(self.perturbations)}")
-        print(f"- Original dataset size: {self.original_dataset_size}")
-        print(f"- Random seed: {random_seed}")
-        print(f"- Test iterations: {len(self.perturbations)} (one per perturbation)")
-
-    def __len__(self):
-        # 返回扰动数量，而不是数据集大小
-        # Return perturbation count, not dataset size
-        return len(self.perturbations)
-
-    def __getitem__(self, index):
-        """
-        获取测试数据项，使用随机选择的样本和指定的扰动
-        Args:
-            index: 扰动索引 (0 到 len(perturbations)-1)
-        """
-        # index是扰动索引 (0 到 len(perturbations)-1)
-        # index is perturbation index (0 to len(perturbations)-1)
         
         # 使用预先生成的随机样本索引
         # Use pre-generated random sample index
@@ -1270,7 +789,7 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
             if len(source_clean) < 100 or len(target_clean) < 100:
                 raise ValueError(f"点云在样本索引{sample_idx}处清理后点数不足100个")
             
-            # 选择处理策略：体素化 vs 简单重采样
+            # 选择处理策略：复杂体素化 vs 标准体素网格质心降采样
             if self.use_voxelization:
                 try:
                     # 使用体素化处理
@@ -1279,54 +798,55 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
                         self.voxel_config, fallback_to_sampling=True
                     )
                 except Exception as e:
-                    print(f"体素化处理失败，回退到重采样: {e}")
-                    # 转换回torch tensor用于重采样
-                    source_tensor = torch.from_numpy(source_clean).float()
-                    target_tensor = torch.from_numpy(target_clean).float()
-                    processed_source = self.resampler(source_tensor).numpy()
-                    processed_target = self.resampler(target_tensor).numpy()
+                    print(f"体素化处理失败，回退到标准体素网格质心降采样: {e}")
+                    # 使用标准体素网格质心降采样作为回退方案
+                    processed_source = adaptive_voxel_grid_downsample(source_clean, self.num_points)
+                    processed_target = adaptive_voxel_grid_downsample(target_clean, self.num_points)
             else:
-                # 使用简单重采样
-                source_tensor = torch.from_numpy(source_clean).float()
-                target_tensor = torch.from_numpy(target_clean).float()
-                processed_source = self.resampler(source_tensor).numpy()
-                processed_target = self.resampler(target_tensor).numpy()
+                # 标准体素网格质心降采样 (Voxel Grid Centroid Downsampling)
+                processed_source = adaptive_voxel_grid_downsample(source_clean, self.num_points)
+                processed_target = adaptive_voxel_grid_downsample(target_clean, self.num_points)
             
             # 转换回torch tensor
             source_tensor = torch.from_numpy(processed_source).float()
             target_tensor = torch.from_numpy(processed_target).float()
             
-            # 分别归一化
-            # 源点云归一化
-            source_min_vals = source_tensor.min(dim=0)[0]
-            source_max_vals = source_tensor.max(dim=0)[0]
-            source_center = (source_min_vals + source_max_vals) / 2
-            source_scale = (source_max_vals - source_min_vals).max()
-            
-            if source_scale < 1e-10:
-                raise ValueError(f"源点云归一化尺度过小，样本索引{sample_idx}: {source_scale}")
-            
-            source_normalized = (source_tensor - source_center) / source_scale
-            
-            # 目标点云归一化
-            target_min_vals = target_tensor.min(dim=0)[0]
-            target_max_vals = target_tensor.max(dim=0)[0]
-            target_center = (target_min_vals + target_max_vals) / 2
-            target_scale = (target_max_vals - target_min_vals).max()
-            
-            if target_scale < 1e-10:
-                raise ValueError(f"目标点云归一化尺度过小，样本索引{sample_idx}: {target_scale}")
-            
-            target_normalized = (target_tensor - target_center) / target_scale
+            # 根据降采样方法选择归一化策略
+            if self.use_voxelization:
+                # 复杂体素化：分别归一化，配合体素化预处理的裁剪操作
+                # 源点云归一化
+                source_min_vals = source_tensor.min(dim=0)[0]
+                source_max_vals = source_tensor.max(dim=0)[0]
+                source_center = (source_min_vals + source_max_vals) / 2
+                source_scale = (source_max_vals - source_min_vals).max()
+                
+                if source_scale < 1e-10:
+                    raise ValueError(f"源点云归一化尺度过小，样本索引{sample_idx}: {source_scale}")
+                
+                source_normalized = (source_tensor - source_center) / source_scale
+                
+                # 目标点云归一化
+                target_min_vals = target_tensor.min(dim=0)[0]
+                target_max_vals = target_tensor.max(dim=0)[0]
+                target_center = (target_min_vals + target_max_vals) / 2
+                target_scale = (target_max_vals - target_min_vals).max()
+                
+                if target_scale < 1e-10:
+                    raise ValueError(f"目标点云归一化尺度过小，样本索引{sample_idx}: {target_scale}")
+                
+                target_normalized = (target_tensor - target_center) / target_scale
+            else:
+                # 标准体素网格质心降采样：联合归一化，保持相对空间关系
+                source_normalized, target_normalized = joint_normalization(source_tensor, target_tensor)
             
             # 应用特定的扰动（而不是随机变换）
             # Apply specific perturbation (instead of random transform)
-            perturbation = self.perturbations[index]
+            perturbation = self.perturbation[index]
             twist = torch.from_numpy(numpy.array(perturbation)).contiguous().view(1, 6)
             x = twist.to(source_normalized)
             
             # 应用扰动变换
-            if not getattr(self.rigid_transform, 'fmt_trans', False):
+            if not self.fmt_trans:
                 # x: twist-vector
                 g = se3.exp(x).to(source_normalized) # [1, 4, 4]
                 transformed_source = se3.transform(g, source_normalized)
@@ -1428,5 +948,336 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
         """获取指定索引的点云标识符"""
         info = self.cloud_info.get(index, {})
         return info.get('identifier', f"unknown_pert{index:04d}")
+
+class SinglePairDataset(torch.utils.data.Dataset):
+    """单对点云数据集，用于处理指定的源点云和目标点云对
+    Single pair point cloud dataset for processing specified source and target point cloud pairs
+    """
+    def __init__(self, source_cloud_path, target_cloud_path, num_points=1024, 
+                 use_voxelization=True, voxel_config=None):
+        """
+        Args:
+            source_cloud_path: 源点云文件路径
+            target_cloud_path: 目标点云文件路径
+            num_points: 目标点云点数
+            use_voxelization: 是否使用体素化处理
+            voxel_config: 体素化配置
+        """
+        self.source_cloud_path = source_cloud_path
+        self.target_cloud_path = target_cloud_path
+        self.num_points = num_points
+        self.use_voxelization = use_voxelization
+        
+        # 设置体素化配置
+        if voxel_config is None:
+            self.voxel_config = VoxelizationConfig(
+                voxel_size=0.05,
+                voxel_grid_size=32,
+                max_voxel_points=100,
+                max_voxels=20000,
+                min_voxel_points_ratio=0.1
+            )
+        else:
+            self.voxel_config = voxel_config
+        
+        # 保留原有的重采样器作为后备
+        self.resampler = transforms.Resampler(num_points)
+        
+        print(f"SinglePairDataset初始化:")
+        print(f"  源点云: {source_cloud_path}")
+        print(f"  目标点云: {target_cloud_path}")
+        print(f"  目标点数: {num_points}")
+        print(f"  降采样方法: {'复杂体素化处理' if use_voxelization else '标准体素网格质心降采样'}")
+        if use_voxelization:
+            print(f"  体素化配置: 网格大小={self.voxel_config.voxel_grid_size}, 体素大小={self.voxel_config.voxel_size}")
+        else:
+            print(f"  降采样说明: 使用经典的体素网格质心降采样方法，保持空间结构")
+    
+    def __len__(self):
+        return 1  # 只有一对点云
+    
+    def __getitem__(self, idx):
+        if idx != 0:
+            raise IndexError("SinglePairDataset只包含一对点云，索引必须为0")
+        
+        try:
+            # 读取点云文件
+            source = plyread(self.source_cloud_path)
+            target = plyread(self.target_cloud_path)
+            
+            # 转换为numpy数组进行处理
+            source_np = source.numpy() if isinstance(source, torch.Tensor) else source
+            target_np = target.numpy() if isinstance(target, torch.Tensor) else target
+            
+            print(f"原始点云大小: 源={source_np.shape}, 目标={target_np.shape}")
+            
+            # 数据清理：移除无效点
+            source_mask = np.isfinite(source_np).all(axis=1)
+            target_mask = np.isfinite(target_np).all(axis=1)
+            
+            source_clean = source_np[source_mask]
+            target_clean = target_np[target_mask]
+            
+            print(f"清理后点云大小: 源={source_clean.shape}, 目标={target_clean.shape}")
+            
+            if len(source_clean) < 100 or len(target_clean) < 100:
+                raise ValueError(f"点云清理后点数不足100个: 源={len(source_clean)}, 目标={len(target_clean)}")
+            
+            # 选择处理策略：复杂体素化 vs 标准体素网格质心降采样
+            if self.use_voxelization:
+                try:
+                    print("使用体素化处理...")
+                    # 使用体素化处理
+                    processed_source, processed_target = voxelize_point_clouds(
+                        source_clean, target_clean, self.num_points, 
+                        self.voxel_config, fallback_to_sampling=True
+                    )
+                    print(f"体素化处理后点云大小: 源={processed_source.shape}, 目标={processed_target.shape}")
+                except Exception as e:
+                    print(f"体素化处理失败，回退到标准体素网格质心降采样: {e}")
+                    # 使用标准体素网格质心降采样作为回退方案
+                    processed_source = adaptive_voxel_grid_downsample(source_clean, self.num_points)
+                    processed_target = adaptive_voxel_grid_downsample(target_clean, self.num_points)
+                    print(f"体素网格质心降采样处理后点云大小: 源={processed_source.shape}, 目标={processed_target.shape}")
+            else:
+                print("使用标准体素网格质心降采样...")
+                # 标准体素网格质心降采样 (Voxel Grid Centroid Downsampling)
+                processed_source = adaptive_voxel_grid_downsample(source_clean, self.num_points)
+                processed_target = adaptive_voxel_grid_downsample(target_clean, self.num_points)
+                print(f"体素网格质心降采样处理后点云大小: 源={processed_source.shape}, 目标={processed_target.shape}")
+            
+            # 转换回torch tensor
+            source_tensor = torch.from_numpy(processed_source).float()
+            target_tensor = torch.from_numpy(processed_target).float()
+            
+            # 根据降采样方法选择归一化策略
+            if self.use_voxelization:
+                # 复杂体素化：分别归一化，配合体素化预处理的裁剪操作
+                # 源点云归一化
+                source_min_vals = source_tensor.min(dim=0)[0]
+                source_max_vals = source_tensor.max(dim=0)[0]
+                source_center = (source_min_vals + source_max_vals) / 2
+                source_scale = (source_max_vals - source_min_vals).max()
+                
+                if source_scale < 1e-10:
+                    raise ValueError(f"源点云归一化尺度过小: {source_scale}")
+                
+                source_normalized = (source_tensor - source_center) / source_scale
+                print(f"源点云分别归一化: 中心={source_center.numpy()}, 尺度={source_scale.item():.6f}")
+                
+                # 目标点云归一化
+                target_min_vals = target_tensor.min(dim=0)[0]
+                target_max_vals = target_tensor.max(dim=0)[0]
+                target_center = (target_min_vals + target_max_vals) / 2
+                target_scale = (target_max_vals - target_min_vals).max()
+                
+                if target_scale < 1e-10:
+                    raise ValueError(f"目标点云归一化尺度过小: {target_scale}")
+                    
+                target_normalized = (target_tensor - target_center) / target_scale
+                print(f"目标点云分别归一化: 中心={target_center.numpy()}, 尺度={target_scale.item():.6f}")
+            else:
+                # 标准体素网格质心降采样：联合归一化，保持相对空间关系
+                source_normalized, target_normalized = joint_normalization(source_tensor, target_tensor)
+                print(f"联合归一化完成: 保持了源点云和目标点云之间的相对空间关系")
+            
+            # 创建一个默认的4x4单位矩阵作为变换矩阵
+            igt = torch.eye(4)
+            
+            print(f"最终输出点云大小: 源={source_normalized.shape}, 目标={target_normalized.shape}")
+            
+            return source_normalized, target_normalized, igt
+            
+        except Exception as e:
+            print(f"处理单对点云时出错: {str(e)}")
+            raise
+
+
+class SinglePairTrackingDataset(torch.utils.data.Dataset):
+    """单对点云跟踪数据集，支持指定扰动的刚性变换
+    Single pair point cloud tracking dataset with specified perturbation rigid transformation
+    """
+    def __init__(self, source_cloud_path, target_cloud_path, perturbation, 
+                 num_points=1024, use_voxelization=True, voxel_config=None, fmt_trans=False):
+        """
+        Args:
+            source_cloud_path: 源点云文件路径
+            target_cloud_path: 目标点云文件路径
+            perturbation: 扰动值 (6维向量: rx,ry,rz,tx,ty,tz)
+            num_points: 目标点云点数
+            use_voxelization: 是否使用体素化处理
+            voxel_config: 体素化配置
+            fmt_trans: 扰动格式 (False: twist, True: rotation+translation)
+        """
+        # 创建基础数据集
+        self.base_dataset = SinglePairDataset(
+            source_cloud_path, target_cloud_path, num_points, use_voxelization, voxel_config
+        )
+        
+        self.perturbation = np.array(perturbation)
+        self.fmt_trans = fmt_trans
+        
+        print(f"SinglePairTrackingDataset初始化:")
+        print(f"  扰动值: {self.perturbation}")
+        print(f"  扰动格式: {'rotation+translation' if fmt_trans else 'twist'}")
+    
+    def do_transform(self, p0, x):
+        """应用扰动变换"""
+        # p0: [N, 3]
+        # x: [1, 6]
+        if not self.fmt_trans:
+            # x: twist-vector
+            g = se3.exp(x).to(p0) # [1, 4, 4]
+            p1 = se3.transform(g, p0)
+            igt = g.squeeze(0) # igt: p0 -> p1
+        else:
+            # x: rotation and translation
+            w = x[:, 0:3]
+            q = x[:, 3:6]
+            R = so3.exp(w).to(p0) # [1, 3, 3]
+            g = torch.zeros(1, 4, 4)
+            g[:, 3, 3] = 1
+            g[:, 0:3, 0:3] = R # rotation
+            g[:, 0:3, 3] = q   # translation
+            p1 = se3.transform(g, p0)
+            igt = g.squeeze(0) # igt: p0 -> p1
+        return p1, igt
+    
+    def __len__(self):
+        return 1  # 只有一对点云
+    
+    def __getitem__(self, idx):
+        if idx != 0:
+            raise IndexError("SinglePairTrackingDataset只包含一对点云，索引必须为0")
+        
+        try:
+            # 获取归一化的点云对
+            source, target, _ = self.base_dataset[0]
+            
+            # 准备扰动变换
+            twist = torch.from_numpy(self.perturbation).contiguous().view(1, 6).float()
+            x = twist.to(source)
+            
+            # 应用扰动变换 (target作为模板，source经过变换后作为源点云)
+            transformed_source, igt = self.do_transform(source, x)
+            
+            print(f"应用扰动变换:")
+            print(f"  扰动向量: {twist.squeeze().numpy()}")
+            print(f"  变换矩阵形状: {igt.shape}")
+            
+            # 返回：模板(目标)、变换后的源、变换矩阵
+            return target, transformed_source, igt
+            
+        except Exception as e:
+            print(f"处理单对点云跟踪时出错: {str(e)}")
+            raise
+
+# 添加 C3VD 数据集支持: C3VDDataset, C3VDset4tracking, C3VDset4tracking_test
+class C3VDDataset(torch.utils.data.Dataset):
+    """C3VD 数据集加载器"""
+    def __init__(self, source_root, target_root=None, transform=None, pair_mode='one_to_one', reference_name=None):
+        import os, glob
+        import torch
+        self.source_root = source_root
+        self.target_root = target_root or os.path.join(os.path.dirname(source_root), 'visible_point_cloud_ply_depth')
+        self.transform = transform
+        self.pair_mode = pair_mode
+        self.reference_name = reference_name
+        if not os.path.exists(self.source_root):
+            raise FileNotFoundError(f"源点云目录不存在: {self.source_root}")
+        if not os.path.exists(self.target_root):
+            raise FileNotFoundError(f"目标点云目录不存在: {self.target_root}")
+        self.folder_names = [d for d in sorted(os.listdir(self.source_root)) if os.path.isdir(os.path.join(self.source_root, d))]
+        self.pairs = []
+        self.pair_scenes = []
+        for folder in self.folder_names:
+            src_dir = os.path.join(self.source_root, folder)
+            tgt_dir = os.path.join(self.target_root, folder)
+            src_files = sorted(glob.glob(os.path.join(src_dir, '*.ply')))
+            if self.pair_mode == 'one_to_one':
+                for src in src_files:
+                    basename = os.path.basename(src)
+                    tgt = os.path.join(tgt_dir, basename)
+                    if not os.path.exists(tgt):
+                        alt = basename.replace('_depth_pcd.ply', '_visible.ply')
+                        tgt = os.path.join(tgt_dir, alt)
+                    self.pairs.append((src, tgt))
+                    self.pair_scenes.append(folder)
+            elif self.pair_mode == 'scene_reference':
+                if self.reference_name:
+                    ref = os.path.join(tgt_dir, self.reference_name)
+                else:
+                    tfs = sorted(glob.glob(os.path.join(tgt_dir, '*.ply')))
+                    ref = tfs[0] if tfs else None
+                for src in src_files:
+                    if ref:
+                        self.pairs.append((src, ref))
+                        self.pair_scenes.append(folder)
+            else:
+                raise ValueError(f"不支持的配对模式: {self.pair_mode}")
+    def __len__(self):
+        return len(self.pairs)
+    def __getitem__(self, idx):
+        src, tgt = self.pairs[idx]
+        source = plyread(src)
+        target = plyread(tgt)
+        if self.transform:
+            source = self.transform(source)
+            target = self.transform(target)
+        igt = torch.eye(4)
+        return source, target, igt
+
+class C3VDset4tracking(torch.utils.data.Dataset):
+    """C3VD 跟踪数据集 (训练用)"""
+    def __init__(self, dataset, rigid_transform, num_points=1024, use_voxelization=True, voxel_config=None):
+        self.dataset = dataset
+        self.rigid_transform = rigid_transform
+        self.num_points = num_points
+        self.resampler = transforms.Resampler(num_points)
+        self.use_voxelization = use_voxelization
+        self.voxel_config = voxel_config
+    def __len__(self):
+        return len(self.dataset)
+    def __getitem__(self, idx):
+        source, target, _ = self.dataset[idx]
+        source = source[torch.isfinite(source).all(dim=1)]
+        target = target[torch.isfinite(target).all(dim=1)]
+        source = self.resampler(source)
+        target = self.resampler(target)
+        source_norm, target_norm = joint_normalization(source, target)
+        p1 = self.rigid_transform(source_norm)
+        igt = self.rigid_transform.igt
+        return target_norm, p1, igt
+
+class C3VDset4tracking_test(torch.utils.data.Dataset):
+    """C3VD 跟踪数据集 (测试用)"""
+    def __init__(self, dataset, rigid_transform, use_joint_normalization=False, num_points=1024):
+        self.dataset = dataset
+        self.rigid_transform = rigid_transform
+        self.use_joint_normalization = use_joint_normalization
+        self.num_points = num_points
+        self.resampler = transforms.Resampler(num_points)
+    def __len__(self):
+        return len(self.dataset)
+    def __getitem__(self, idx):
+        source, target, _ = self.dataset[idx]
+        source = source[torch.isfinite(source).all(dim=1)]
+        target = target[torch.isfinite(target).all(dim=1)]
+        source = self.resampler(source)
+        target = self.resampler(target)
+        if self.use_joint_normalization:
+            source_norm, target_norm = joint_normalization(source, target)
+        else:
+            def normalize(p):
+                minv = p.min(dim=0)[0]
+                maxv = p.max(dim=0)[0]
+                center = (minv + maxv) / 2
+                scale = (maxv - minv).max()
+                return (p - center) / scale
+            source_norm = normalize(source)
+            target_norm = normalize(target)
+        p1 = self.rigid_transform(source_norm)
+        igt = self.rigid_transform.igt
+        return target_norm, p1, igt
 
 # EOF

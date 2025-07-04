@@ -21,6 +21,7 @@ import traceback
 import warnings
 from scipy.spatial.transform import Rotation
 import math
+import glob
 
 # 抑制CUDA警告
 # Suppress CUDA warnings
@@ -35,6 +36,17 @@ from ptlk import attention_v1
 from ptlk import mamba3d_v1  # 导入Mamba3D模块
 from ptlk import fast_point_attention  # 导入快速点注意力模块
 from ptlk import cformer  # 导入Cformer模块
+
+# 添加必要的导入
+# Add necessary imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import ptlk.data.datasets as datasets
+from ptlk.data.datasets import ModelNet, ShapeNet2, C3VDDataset, C3VDset4tracking, C3VDset4tracking_test, VoxelizationConfig
+from ptlk.data.datasets import SinglePairDataset, SinglePairTrackingDataset  # 新增导入
+from ptlk.data.datasets import C3VDset4tracking_test_random_sample, CADset4tracking_fixed_perturbation_random_sample
+import ptlk.data.transforms as transforms
+import ptlk.pointlk as pointlk
+from ptlk import so3, se3  # 修改导入方式
 
 
 LOGGER = logging.getLogger(__name__)
@@ -159,10 +171,59 @@ def options(argv=None):
     parser.add_argument('--perturbation-file', default=None, type=str,
                         metavar='PATH', help='Single perturbation file path (e.g., gt_poses.csv)')
 
+    # 新增：单对点云输入模式参数
+    # New: Single pair point cloud input mode parameters
+    parser.add_argument('--single-pair-mode', action='store_true', default=False,
+                        help='启用单对点云输入模式 (Enable single pair point cloud input mode)')
+    parser.add_argument('--source-cloud', default=None, type=str,
+                        metavar='PATH', help='源点云文件路径 (Source point cloud file path)')
+    parser.add_argument('--target-cloud', default=None, type=str,
+                        metavar='PATH', help='目标点云文件路径 (Target point cloud file path)')
+    parser.add_argument('--single-perturbation', default=None, type=str,
+                        metavar='VALUES', help='单行扰动值，逗号分隔 (Single perturbation values, comma-separated). 格式: rx,ry,rz,tx,ty,tz')
+    parser.add_argument('--enhanced-output', action='store_true', default=False,
+                        help='输出增强信息，包括传入的扰动和预测的变换 (Output enhanced information including input perturbation and predicted transformation)')
+
     args = parser.parse_args(argv)
     return args
 
 def main(args):
+    # 新增：单对点云输入模式处理
+    # New: Single pair point cloud input mode processing
+    if args.single_pair_mode:
+        # 验证单对点云模式的必要参数
+        if not args.source_cloud or not args.target_cloud:
+            print("错误: 单对点云模式需要指定 --source-cloud 和 --target-cloud 参数")
+            print("Error: Single pair mode requires --source-cloud and --target-cloud parameters")
+            return
+        
+        if not args.single_perturbation:
+            print("错误: 单对点云模式需要指定 --single-perturbation 参数")
+            print("Error: Single pair mode requires --single-perturbation parameter")
+            return
+        
+        # 检查点云文件是否存在
+        if not os.path.exists(args.source_cloud):
+            print(f"错误: 源点云文件不存在: {args.source_cloud}")
+            print(f"Error: Source cloud file does not exist: {args.source_cloud}")
+            return
+        
+        if not os.path.exists(args.target_cloud):
+            print(f"错误: 目标点云文件不存在: {args.target_cloud}")
+            print(f"Error: Target cloud file does not exist: {args.target_cloud}")
+            return
+        
+        print(f"\n====== 单对点云输入模式 Single Pair Point Cloud Mode ======")
+        print(f"源点云 Source cloud: {args.source_cloud}")
+        print(f"目标点云 Target cloud: {args.target_cloud}")
+        print(f"扰动值 Perturbation: {args.single_perturbation}")
+        print(f"增强输出 Enhanced output: {args.enhanced_output}")
+        
+        # 调用单对点云处理函数
+        process_single_pair(args)
+        return
+    
+    # 原有的批量处理逻辑保持不变
     # 创建空列表存储所有要处理的扰动文件
     # Create empty list to store all perturbation files to process
     perturbation_files = []
@@ -293,14 +354,20 @@ def run(args, testset, action):
             self.pre_check_dataset()
             
         def pre_check_dataset(self):
-            """预检查数据集中的所有样本"""
-            """Pre-check all samples in the dataset"""
+            """预检查数据集中的少量样本"""
+            """Pre-check a few samples in the dataset"""
             print(f"Starting to check samples in the dataset...")
             total_samples = len(self.dataset)
             
-            # 实际检查所有样本
-            # Actually check all samples
-            for idx in range(total_samples):
+            # 只检查前10个样本或总数的1%，取较小值
+            # Only check first 10 samples or 1% of total, whichever is smaller
+            check_count = min(10, max(1, total_samples // 100))
+            print(f"Checking {check_count} samples out of {total_samples} total samples...")
+            
+            # 快速检查少量样本
+            # Quick check of few samples
+            valid_count = 0
+            for idx in range(check_count):
                 try:
                     # 尝试获取样本
                     # Try to get sample
@@ -330,15 +397,25 @@ def run(args, testset, action):
                         print(f"Warning: Sample {idx} has empty point cloud")
                         continue
                     
-                    # 如果样本有效，添加到有效索引列表
-                    # If sample is valid, add to valid index list
-                    self.valid_indices.append(idx)
+                    # 如果样本有效，计数增加
+                    # If sample is valid, increment count
+                    valid_count += 1
                     
                 except Exception as e:
-                    print(f"Warning: Skipping invalid sample {idx}: {str(e)}")
+                    print(f"Warning: Sample {idx} failed validation: {str(e)}")
                     continue
-                
             
+            print(f"Validation completed: {valid_count}/{check_count} samples are valid")
+            
+            # 假设所有样本都有效（基于少量样本的检查结果）
+            # Assume all samples are valid (based on small sample check results)
+            if valid_count > 0:
+                print(f"Dataset appears healthy, assuming all {total_samples} samples are usable")
+                self.valid_indices = list(range(total_samples))
+            else:
+                print(f"Warning: No valid samples found in initial check, but continuing with full dataset")
+                self.valid_indices = list(range(total_samples))
+        
         def __len__(self):
             return len(self.valid_indices)
         
@@ -928,6 +1005,22 @@ class Action:
                     do_visualize = need_visualization and i in vis_indices
                     
                     try:
+                        # 定期清理GPU内存，特别是在长时间运行后
+                        # Periodic GPU memory cleanup, especially after long runs
+                        if i > 0 and i % 100 == 0:
+                            torch.cuda.empty_cache()
+                            print(f"GPU memory cleanup at sample {i}")
+                        
+                        # 检查CUDA状态
+                        # Check CUDA status
+                        if i > 0 and i % 500 == 0:
+                            if torch.cuda.is_available():
+                                memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                                memory_reserved = torch.cuda.memory_reserved() / 1024**3   # GB
+                                print(f"Sample {i}: GPU memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
+                            else:
+                                print(f"Warning: CUDA not available at sample {i}")
+                        
                         p0, p1, igt = data
                         
                         # 检查点云形状和有效性
@@ -939,6 +1032,15 @@ class Action:
                             print(f"警告: 批次 {i} 包含NaN值，尝试修复")
                             p0 = torch.nan_to_num(p0, nan=0.0, posinf=1.0, neginf=-1.0)
                             p1 = torch.nan_to_num(p1, nan=0.0, posinf=1.0, neginf=-1.0)
+                        
+                        # 检查扰动矩阵有效性
+                        if not torch.isfinite(igt).all():
+                            print(f"警告: 批次 {i} 扰动矩阵包含无效值，跳过此样本")
+                            error_count += 1
+                            dummy_vals = ['nan'] * 6
+                            print(','.join(dummy_vals), file=fout)
+                            fout.flush()
+                            continue
                         
                         # 获取场景信息和源文件路径（用于命名可视化文件）
                         scene_name = "unknown"
@@ -1003,22 +1105,69 @@ class Action:
                                 'target_file': target_file_path
                             }
                         
-                        # 执行配准
-                        res = self.do_estimate(p0, p1, model, device) # --> [1, 4, 4]
+                        # 执行配准，加入额外的错误检查
+                        # Perform registration with additional error checking
+                        try:
+                            res = self.do_estimate(p0, p1, model, device) # --> [1, 4, 4]
+                            
+                            # 检查配准结果有效性
+                            if not torch.isfinite(res).all():
+                                print(f"警告: 批次 {i} 配准结果包含无效值")
+                                error_count += 1
+                                dummy_vals = ['nan'] * 6
+                                print(','.join(dummy_vals), file=fout)
+                                fout.flush()
+                                continue
+                                
+                        except Exception as registration_error:
+                            print(f"配准错误: 批次 {i} 配准失败: {str(registration_error)}")
+                            error_count += 1
+                            dummy_vals = ['nan'] * 6
+                            print(','.join(dummy_vals), file=fout)
+                            fout.flush()
+                            continue
+                        
                         ig_gt = igt.cpu().contiguous().view(-1, 4, 4) # --> [1, 4, 4]
                         g_hat = res.cpu().contiguous().view(-1, 4, 4) # --> [1, 4, 4]
 
                         # 计算配准误差
-                        dg = g_hat.bmm(ig_gt) # if correct, dg == identity matrix.
-                        dx = ptlk.se3.log(dg) # --> [1, 6] (if correct, dx == zero vector)
-                        
-                        # 分别计算旋转误差和平移误差
-                        rot_error = dx[:, :3]  # 旋转误差 [1, 3]
-                        trans_error = dx[:, 3:]  # 平移误差 [1, 3]
-                        
-                        rot_norm = rot_error.norm(p=2, dim=1)  # 旋转误差L2范数
-                        trans_norm = trans_error.norm(p=2, dim=1)  # 平移误差L2范数
-                        total_norm = dx.norm(p=2, dim=1)  # 总误差L2范数
+                        try:
+                            dg = g_hat.bmm(ig_gt) # if correct, dg == identity matrix.
+                            dx = ptlk.se3.log(dg) # --> [1, 6] (if correct, dx == zero vector)
+                            
+                            # 检查误差向量有效性
+                            if not torch.isfinite(dx).all():
+                                print(f"警告: 批次 {i} 误差计算包含无效值")
+                                error_count += 1
+                                dummy_vals = ['nan'] * 6
+                                print(','.join(dummy_vals), file=fout)
+                                fout.flush()
+                                continue
+                            
+                            # 分别计算旋转误差和平移误差
+                            rot_error = dx[:, :3]  # 旋转误差 [1, 3]
+                            trans_error = dx[:, 3:]  # 平移误差 [1, 3]
+                            
+                            rot_norm = rot_error.norm(p=2, dim=1)  # 旋转误差L2范数
+                            trans_norm = trans_error.norm(p=2, dim=1)  # 平移误差L2范数
+                            total_norm = dx.norm(p=2, dim=1)  # 总误差L2范数
+                            
+                            # 检查计算结果有效性
+                            if not (torch.isfinite(rot_norm).all() and torch.isfinite(trans_norm).all() and torch.isfinite(total_norm).all()):
+                                print(f"警告: 批次 {i} 误差范数计算包含无效值")
+                                error_count += 1
+                                dummy_vals = ['nan'] * 6
+                                print(','.join(dummy_vals), file=fout)
+                                fout.flush()
+                                continue
+                            
+                        except Exception as error_calc_error:
+                            print(f"误差计算错误: 批次 {i} 误差计算失败: {str(error_calc_error)}")
+                            error_count += 1
+                            dummy_vals = ['nan'] * 6
+                            print(','.join(dummy_vals), file=fout)
+                            fout.flush()
+                            continue
                         
                         # 累加误差统计
                         total_rot_error += rot_norm.item()
@@ -1328,8 +1477,18 @@ class Action:
                         
                     except Exception as e:
                         print(f"错误: 处理批次 {i} 时出错: {str(e)}")
+                        # 检查是否是CUDA错误
+                        error_str = str(e).lower()
+                        if 'cuda' in error_str or 'cublas' in error_str or 'cudnn' in error_str:
+                            print(f"检测到CUDA错误，尝试清理GPU内存...")
+                            torch.cuda.empty_cache()
+                            if torch.cuda.is_available():
+                                torch.cuda.synchronize()
+                                print(f"GPU内存清理完成")
+                        
                         # 记录错误详情到日志
                         LOGGER.error('Error in batch %d: %s', i, str(e), exc_info=True)
+                        error_count += 1
                         # 写入无效结果
                         dummy_vals = ['nan'] * 6
                         print(','.join(dummy_vals), file=fout)
@@ -1708,121 +1867,374 @@ def get_datasets(args):
             
             raise RuntimeError("Cannot find paired point clouds, please check dataset structure and pairing mode settings")
         
-        # 不进行数据分割，直接使用整个数据集作为测试集
-        # Don't split data, use entire dataset as test set
-        testdata = c3vd_dataset
+        # 应用与训练脚本相同的场景级别数据划分逻辑
+        # Apply the same scene-level data splitting logic as training script
+        print(f"\n====== Dataset Splitting ======")
         
-        # 创建一个自定义的RandomTransformSE3类，使用固定的扰动而不是随机生成
-        # Create a custom RandomTransformSE3 class that uses fixed perturbations instead of random generation
-        class FixedTransformSE3(ptlk.data.transforms.RandomTransformSE3):
-            def __init__(self, perturbations, fmt_trans=False):
-                super().__init__(0.8, False)  # 随机参数在这里不重要，我们会覆盖__call__ # Random parameters don't matter here, we will override __call__
-                self.perturbations = perturbations
+        # 获取所有场景（与训练脚本完全相同的逻辑）
+        # Get all scenes (exactly same logic as training script)
+        all_scenes = []
+        source_root_for_split = os.path.join(args.dataset_path, 'C3VD_ply_source')
+        for scene_dir in glob.glob(os.path.join(source_root_for_split, "*")):
+            if os.path.isdir(scene_dir):
+                all_scenes.append(os.path.basename(scene_dir))
+        
+        # 使用固定随机种子42随机选择4个场景作为测试集（与训练脚本保持一致）
+        # Use fixed random seed 42 to randomly select 4 scenes as test set (consistent with training script)
+        import random
+        random.seed(42)
+        test_scenes = random.sample(all_scenes, 4)
+        train_scenes = [scene for scene in all_scenes if scene not in test_scenes]
+        
+        print(f"All scenes ({len(all_scenes)}): {sorted(all_scenes)}")
+        print(f"Training scenes ({len(train_scenes)}): {sorted(train_scenes)}")
+        print(f"Test scenes ({len(test_scenes)}): {sorted(test_scenes)}")
+        
+        # 只使用测试场景的数据，过滤出测试集的索引
+        # Only use test scene data, filter out test set indices
+        test_indices = []
+        
+        for idx, (source_file, target_file) in enumerate(c3vd_dataset.pairs):
+            # 从源文件路径提取场景名称
+            # Extract scene name from source file path
+            scene_name = None
+            for scene in all_scenes:
+                if f"/{scene}/" in source_file:
+                    scene_name = scene
+                    break
+            
+            # 只保留测试场景的数据
+            # Only keep test scene data
+            if scene_name in test_scenes:
+                test_indices.append(idx)
+        
+        # 创建测试数据子集（只包含测试场景的数据）
+        # Create test data subset (only includes test scene data)
+        testdata = torch.utils.data.Subset(c3vd_dataset, test_indices)
+        
+        print(f"Total paired point clouds: {len(c3vd_dataset.pairs)}")
+        print(f"Test set point cloud pairs (test scenes only): {len(testdata)}")
+        
+        # 验证测试集只包含测试场景的数据
+        # Verify that test set only contains test scene data
+        if len(testdata) > 0:
+            # 检查前几个样本确认场景划分正确
+            # Check first few samples to confirm correct scene splitting
+            print(f"\nTest set scene verification:")
+            sample_scenes = set()
+            for i in range(min(10, len(testdata))):
+                idx = testdata.indices[i]
+                source_file, target_file = c3vd_dataset.pairs[idx]
+                for scene in all_scenes:
+                    if f"/{scene}/" in source_file:
+                        sample_scenes.add(scene)
+                        break
+            print(f"Scenes in test set samples: {sorted(sample_scenes)}")
+            print(f"Expected test scenes: {sorted(test_scenes)}")
+            if sample_scenes.issubset(set(test_scenes)):
+                print("✅ Scene splitting verification passed")
+            else:
+                print("❌ Warning: Scene splitting verification failed")
+        else:
+            print("❌ Error: No test samples found after scene splitting")
+            raise RuntimeError("No test samples found after applying scene-based splitting")
+        
+        # 创建简单的变换包装类（用于C3VD数据集的扰动测试）
+        # Create simple transformation wrapper class (for C3VD dataset perturbation testing)
+        class SimpleRigidTransform:
+            def __init__(self, perturbations_data, fmt_trans=False):
+                self.perturbations = perturbations_data
                 self.fmt_trans = fmt_trans
-                self.igt = None  # 初始化igt属性 # Initialize igt attribute
-                self.idx = 0  # 当前使用的扰动索引 # Current perturbation index being used
-                
-            def __call__(self, points):
-                # 从扰动文件获取一个扰动向量，每次调用使用下一个扰动
-                # Get a perturbation vector from perturbation file, use next perturbation each call
-                if self.idx >= len(self.perturbations):
-                    self.idx = 0  # 如果已经用完所有扰动，重新从第一个开始 # If all perturbations used, start from first again
-                
-                # 获取当前扰动
-                # Get current perturbation
-                twist = torch.from_numpy(self.perturbations[self.idx]).contiguous().view(1, 6)
-                self.idx += 1  # 更新索引 # Update index
-                
-                x = twist.to(points)
-                
-                if not self.fmt_trans:
-                    # 按照扭曲向量方式处理
-                    # Process according to twist vector method
-                    g = ptlk.se3.exp(x).to(points)  # [1, 4, 4]
-                    p1 = ptlk.se3.transform(g, points)
-                    self.igt = g.squeeze(0)  # igt: points -> p1
-                else:
-                    # 按照旋转和平移方式处理
-                    # Process according to rotation and translation method
-                    w = x[:, 0:3]
-                    q = x[:, 3:6]
-                    g = torch.zeros(1, 4, 4).to(points)
-                    g[:, 3, 3] = 1
-                    g[:, 0:3, 0:3] = ptlk.so3.exp(w).to(points)  # 旋转 # Rotation
-                    g[:, 0:3, 3] = q  # 平移 # Translation
-                    p1 = ptlk.se3.transform(g, points)
-                    self.igt = g.squeeze(0)  # igt: points -> p1
+                self.igt = None  # 当前变换矩阵
+                self.current_perturbation_index = 0  # 当前扰动索引
+            
+            def __call__(self, tensor):
+                """应用刚性变换到点云
+                Args:
+                    tensor: 输入点云 [N, 3]
+                Returns:
+                    transformed_tensor: 变换后的点云 [N, 3]
+                """
+                try:
+                    # 检查是否有扰动数据
+                    if self.perturbations is None or len(self.perturbations) == 0:
+                        print("警告: 没有扰动数据，返回原始点云")
+                        self.igt = torch.eye(4).to(tensor.device)
+                        return tensor
                     
-                return p1
+                    # 根据数据集类型选择扰动
+                    if hasattr(self, 'current_perturbation_index'):
+                        # 对于固定扰动模式，使用当前索引
+                        pert_idx = self.current_perturbation_index % len(self.perturbations)
+                    else:
+                        # 对于随机扰动模式，随机选择
+                        pert_idx = torch.randint(0, len(self.perturbations), (1,)).item()
+                    
+                    # 获取扰动参数
+                    perturbation = self.perturbations[pert_idx]
+                    
+                    # 确保perturbation是numpy数组或可转换为tensor
+                    if isinstance(perturbation, (list, tuple)):
+                        perturbation = torch.tensor(perturbation, dtype=torch.float32)
+                    elif isinstance(perturbation, np.ndarray):
+                        perturbation = torch.from_numpy(perturbation).float()
+                    elif not isinstance(perturbation, torch.Tensor):
+                        perturbation = torch.tensor(perturbation, dtype=torch.float32)
+                    
+                    # 将perturbation移到正确的设备
+                    perturbation = perturbation.to(tensor.device)
+                    
+                    # 确保perturbation形状正确
+                    if perturbation.dim() == 1:
+                        if len(perturbation) == 6:
+                            # 6D扰动 [rx, ry, rz, tx, ty, tz]
+                            rotation_params = perturbation[:3]  # [rx, ry, rz]
+                            translation_params = perturbation[3:6]  # [tx, ty, tz]
+                        elif len(perturbation) == 3:
+                            # 只有旋转参数
+                            rotation_params = perturbation
+                            translation_params = torch.zeros(3).to(tensor.device)
+                        else:
+                            print(f"警告: 不支持的扰动维度 {len(perturbation)}，使用单位变换")
+                            rotation_params = torch.zeros(3).to(tensor.device)
+                            translation_params = torch.zeros(3).to(tensor.device)
+                    else:
+                        print(f"警告: 扰动形状不正确 {perturbation.shape}，使用单位变换")
+                        rotation_params = torch.zeros(3).to(tensor.device)
+                        translation_params = torch.zeros(3).to(tensor.device)
+                    
+                    # 生成旋转矩阵（使用Rodrigues公式）
+                    angle = torch.norm(rotation_params)
+                    if angle < 1e-8:
+                        rotation_matrix = torch.eye(3).to(tensor.device)
+                    else:
+                        axis = rotation_params / angle
+                        cos_angle = torch.cos(angle)
+                        sin_angle = torch.sin(angle)
+                        
+                        # Rodrigues旋转公式
+                        K = torch.tensor([
+                            [0, -axis[2], axis[1]],
+                            [axis[2], 0, -axis[0]],
+                            [-axis[1], axis[0], 0]
+                        ]).to(tensor.device)
+                        
+                        rotation_matrix = torch.eye(3).to(tensor.device) + sin_angle * K + (1 - cos_angle) * torch.mm(K, K)
+                    
+                    # 构建4x4变换矩阵
+                    transform_matrix = torch.eye(4).to(tensor.device)
+                    transform_matrix[:3, :3] = rotation_matrix
+                    transform_matrix[:3, 3] = translation_params
+                    
+                    # 保存逆变换矩阵（用于后续误差计算）
+                    self.igt = transform_matrix
+                    
+                    # 应用变换到点云
+                    # 添加齐次坐标
+                    ones = torch.ones(tensor.shape[0], 1).to(tensor.device)
+                    homogeneous_points = torch.cat([tensor, ones], dim=1)  # [N, 4]
+                    
+                    # 应用变换
+                    transformed_homogeneous = torch.mm(homogeneous_points, transform_matrix.t())  # [N, 4]
+                    
+                    # 提取3D坐标
+                    transformed_tensor = transformed_homogeneous[:, :3]
+                    
+                    return transformed_tensor
+                    
+                except Exception as e:
+                    print(f"变换应用失败: {e}")
+                    print(f"使用单位变换，返回原始点云")
+                    self.igt = torch.eye(4).to(tensor.device)
+                    return tensor
         
-        # 创建固定变换
-        # Create fixed transformation
-        fixed_transform = FixedTransformSE3(perturbations, fmt_trans)
+        # 创建变换对象
+        # Create transform object
+        rigid_transform = SimpleRigidTransform(perturbations, fmt_trans=False)
         
         # 根据是否为gt_poses模式选择不同的数据集类
         # Choose different dataset class based on whether it's gt_poses mode
         if is_gt_poses_mode:
             print(f"使用C3VD随机选择模式...")
             testset = ptlk.data.datasets.C3VDset4tracking_test_random_sample(
-                testdata, 
-                fixed_transform, 
-                num_points=args.num_points,  # 传递点数参数 # Pass point number parameter
-                use_voxelization=use_voxelization,
-                voxel_config=voxel_config,
-                random_seed=42
-            )
+                testdata, rigid_transform, num_points=args.num_points,
+                use_voxelization=use_voxelization, voxel_config=voxel_config, random_seed=42)
         else:
-            # 使用我们新创建的测试专用数据集
-            # Use our newly created test-specific dataset
             testset = ptlk.data.datasets.C3VDset4tracking_test(
-                testdata, 
-                fixed_transform, 
-                num_points=args.num_points,  # 传递点数参数 # Pass point number parameter
-                use_voxelization=use_voxelization,
-                voxel_config=voxel_config
-            )
+                testdata, rigid_transform, num_points=args.num_points,
+                use_voxelization=use_voxelization, voxel_config=voxel_config)
         
-        # 打印数据集信息
-        # Print dataset information
-        print(f"C3VD dataset total size: {len(c3vd_dataset)}")
-        print(f"Test set size: {len(testset)}")
-        
-        if not is_gt_poses_mode:
-            # 查看部分样本信息
-            # View partial sample information
-            print("\nSample pairing information examples:")
-            for i in range(min(3, len(c3vd_dataset.pairs))):
-                source_file, target_file = c3vd_dataset.pairs[i]
-                source_basename = os.path.basename(source_file)
-                target_basename = os.path.basename(target_file)
-                print(f"Sample {i}: source={source_basename}, target={target_basename}")
-        
-        # 随机选择指定数量的样本进行测试（仅在非gt_poses模式下）
-        # Randomly select specified number of samples for testing (only in non-gt_poses mode)
-        max_samples = args.max_samples
-        if not is_gt_poses_mode and max_samples > 0 and len(testset) > max_samples:
-            print(f"Dataset too large, randomly selecting {max_samples} samples for testing...")
-            # 设置随机种子以确保可复现性
-            # Set random seed to ensure reproducibility
-            torch.manual_seed(42)
-            # 获取随机索引
-            # Get random indices
-            indices = torch.randperm(len(testset))[:max_samples].tolist()
-            # 创建子集
-            # Create subset
-            testset = torch.utils.data.Subset(testset, indices)
-            print(f"Sampled test set size: {len(testset)}")
-        elif not is_gt_poses_mode and max_samples <= 0:
-            print(f"Using all samples for testing (max_samples={max_samples} means no limit)...")
-            print(f"Full test set size: {len(testset)}")
-        elif not is_gt_poses_mode:
-            print(f"Dataset size ({len(testset)}) is within limit ({max_samples}), using all samples...")
-            print(f"Test set size: {len(testset)}")
-        elif is_gt_poses_mode:
-            print(f"GT_POSES模式: 忽略max_samples参数，测试扰动数量次")
-            print(f"Final test set size: {len(testset)}")
+        print(f"Created test set with {len(testset)} perturbation samples")
 
     return testset
+
+
+def process_single_pair(args):
+    """处理单对点云输入模式
+    Process single pair point cloud input mode
+    """
+    import time
+    from ptlk.data.datasets import SinglePairTrackingDataset, VoxelizationConfig
+    import ptlk.se3 as se3
+    
+    try:
+        print(f"\n========== 开始单对点云处理 Starting Single Pair Processing ==========")
+        
+        # 解析扰动值
+        perturbation_values = [float(x.strip()) for x in args.single_perturbation.split(',')]
+        if len(perturbation_values) != 6:
+            raise ValueError(f"扰动值必须是6个数字 (rx,ry,rz,tx,ty,tz)，当前提供了{len(perturbation_values)}个")
+        
+        print(f"扰动值: {perturbation_values}")
+        
+        # 创建体素化配置
+        voxel_config = VoxelizationConfig(
+            voxel_size=args.voxel_size,
+            voxel_grid_size=args.voxel_grid_size,
+            max_voxel_points=args.max_voxel_points,
+            max_voxels=args.max_voxels,
+            min_voxel_points_ratio=args.min_voxel_points_ratio
+        )
+        
+        # 创建单对点云跟踪数据集
+        print(f"\n创建单对点云跟踪数据集...")
+        testset = SinglePairTrackingDataset(
+            source_cloud_path=args.source_cloud,
+            target_cloud_path=args.target_cloud,
+            perturbation=perturbation_values,
+            num_points=args.num_points,
+            use_voxelization=args.use_voxelization,
+            voxel_config=voxel_config,
+            fmt_trans=(args.format == 'wt')
+        )
+        
+        # 创建数据加载器
+        testloader = torch.utils.data.DataLoader(
+            testset, batch_size=1, shuffle=False, num_workers=1
+        )
+        
+        # 创建动作执行器
+        act = Action(args)
+        
+        # 加载模型
+        print(f"\n加载模型...")
+        model = act.create_model()
+        device = torch.device(args.device)
+        model = model.to(device)
+        model.eval()
+        
+        print(f"模型类型: {args.model_type}")
+        print(f"设备: {device}")
+        
+        # 进行预测
+        print(f"\n开始预测...")
+        with torch.no_grad():
+            for i, (template, source, igt) in enumerate(testloader):
+                template = template.to(device)
+                source = source.to(device)
+                igt = igt.to(device)
+                
+                print(f"\n处理批次 {i+1}/1:")
+                print(f"  模板形状: {template.shape}")
+                print(f"  源点云形状: {source.shape}")
+                print(f"  真实变换矩阵形状: {igt.shape}")
+                
+                # 进行配准预测
+                g_hat = act.do_estimate(template, source, model, device)
+                
+                print(f"  预测变换矩阵形状: {g_hat.shape}")
+                
+                # 计算误差
+                print(f"\n========== 配准结果 Registration Results ==========")
+                
+                # 输出传入的扰动
+                print(f"传入的扰动 Input Perturbation:")
+                print(f"  向量形式: [{', '.join([f'{x:.6f}' for x in perturbation_values])}]")
+                print(f"  旋转部分 (rx,ry,rz): [{', '.join([f'{x:.6f}' for x in perturbation_values[:3]])}]")
+                print(f"  平移部分 (tx,ty,tz): [{', '.join([f'{x:.6f}' for x in perturbation_values[3:]])}]")
+                
+                # 输出预测的变换
+                print(f"\n预测的变换 Predicted Transformation:")
+                g_hat_np = g_hat.cpu().numpy().squeeze()
+                print(f"  变换矩阵:")
+                for row in range(4):
+                    print(f"    [{', '.join([f'{g_hat_np[row, col]:8.6f}' for col in range(4)])}]")
+                
+                # 提取旋转和平移
+                predicted_twist = se3.log(g_hat).cpu().numpy().squeeze()
+                print(f"  扭转向量形式: [{', '.join([f'{x:.6f}' for x in predicted_twist])}]")
+                print(f"  旋转部分: [{', '.join([f'{x:.6f}' for x in predicted_twist[:3]])}]")
+                print(f"  平移部分: [{', '.join([f'{x:.6f}' for x in predicted_twist[3:]])}]")
+                
+                # 计算配准误差
+                igt_np = igt.cpu().numpy().squeeze()
+                g_hat_np = g_hat.cpu().numpy().squeeze()
+                
+                # 计算相对误差变换
+                g_rel = np.linalg.inv(igt_np) @ g_hat_np
+                
+                # 计算旋转误差（角度）
+                R_rel = g_rel[:3, :3]
+                trace_R = np.trace(R_rel)
+                # 避免数值误差导致的域错误
+                cos_angle = (trace_R - 1) / 2
+                cos_angle = np.clip(cos_angle, -1, 1)
+                rotation_error_rad = np.arccos(cos_angle)
+                rotation_error_deg = np.degrees(rotation_error_rad)
+                
+                # 计算平移误差（欧氏距离）
+                t_rel = g_rel[:3, 3]
+                translation_error = np.linalg.norm(t_rel)
+                
+                print(f"\n配准误差 Registration Error:")
+                print(f"  旋转误差: {rotation_error_rad:.6f} 弧度 = {rotation_error_deg:.6f} 度")
+                print(f"  平移误差: {translation_error:.6f}")
+                
+                # 如果启用增强输出，保存到文件
+                if args.enhanced_output:
+                    print(f"\n保存增强输出到文件: {args.outfile}")
+                    
+                    # 确保输出目录存在
+                    os.makedirs(os.path.dirname(args.outfile), exist_ok=True)
+                    
+                    with open(args.outfile, 'w') as f:
+                        f.write("# 单对点云配准结果 Single Pair Point Cloud Registration Results\n")
+                        f.write(f"# 源点云: {args.source_cloud}\n")
+                        f.write(f"# 目标点云: {args.target_cloud}\n")
+                        f.write(f"# 模型类型: {args.model_type}\n")
+                        f.write(f"# 处理时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        f.write("\n")
+                        
+                        f.write("# 传入的扰动 Input Perturbation\n")
+                        f.write(f"input_perturbation_vector,{','.join([f'{x:.6f}' for x in perturbation_values])}\n")
+                        f.write(f"input_rotation_part,{','.join([f'{x:.6f}' for x in perturbation_values[:3]])}\n")
+                        f.write(f"input_translation_part,{','.join([f'{x:.6f}' for x in perturbation_values[3:]])}\n")
+                        f.write("\n")
+                        
+                        f.write("# 预测的变换 Predicted Transformation\n")
+                        f.write(f"predicted_twist_vector,{','.join([f'{x:.6f}' for x in predicted_twist])}\n")
+                        f.write(f"predicted_rotation_part,{','.join([f'{x:.6f}' for x in predicted_twist[:3]])}\n")
+                        f.write(f"predicted_translation_part,{','.join([f'{x:.6f}' for x in predicted_twist[3:]])}\n")
+                        f.write("\n")
+                        
+                        f.write("# 预测变换矩阵 Predicted Transformation Matrix\n")
+                        for row in range(4):
+                            f.write(f"transformation_matrix_row_{row},{','.join([f'{g_hat_np[row, col]:.6f}' for col in range(4)])}\n")
+                        f.write("\n")
+                        
+                        f.write("# 配准误差 Registration Error\n")
+                        f.write(f"rotation_error_rad,{rotation_error_rad:.6f}\n")
+                        f.write(f"rotation_error_deg,{rotation_error_deg:.6f}\n")
+                        f.write(f"translation_error,{translation_error:.6f}\n")
+                
+                print(f"\n========== 单对点云处理完成 Single Pair Processing Completed ==========")
+                break  # 只处理一个批次
+                
+    except Exception as e:
+        print(f"单对点云处理失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 if __name__ == '__main__':

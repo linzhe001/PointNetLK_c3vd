@@ -3,7 +3,7 @@
 #$ -l h_vmem=32G            
 #$ -l h_rt=36000  # 1小时测试时间
 #$ -l gpu=true
-
+#$ -l gpu_type=a6000
 #$ -pe gpu 1
 #$ -N ljiang_test_cformer_c3vd
 #$ -o /SAN/medic/MRpcr/logs/f_test_cformer_c3vd_output.log
