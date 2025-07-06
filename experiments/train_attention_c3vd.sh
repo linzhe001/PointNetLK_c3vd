@@ -150,75 +150,6 @@ if [ ${ESTIMATED_MEMORY} -gt 8000 ]; then
     echo "💡 建议批次大小: ${SUGGESTED_BATCH}"
 fi
 
-# 等待用户确认（可选）
-echo ""
-echo "========== 开始两阶段训练 =========="
-echo "🚀 即将开始AttentionNet两阶段训练..."
-echo "📋 第一阶段: 分类器训练 (~$((${EPOCHS_CLASSIFIER} * 2))分钟)"
-echo "📋 第二阶段: PointLK配准训练 (~$((${EPOCHS_POINTLK} * 2))分钟)"
-echo "⏱️  预估总训练时间: $(($((${EPOCHS_CLASSIFIER} + ${EPOCHS_POINTLK})) * 2))分钟"
-echo ""
-
-# =============================================
-# 第一阶段：训练AttentionNet分类器
-# =============================================
-echo "========== 第一阶段：训练AttentionNet分类器 =========="
-echo "🧠 开始训练AttentionNet分类器..."
-echo "📁 输出前缀: ${CLASSIFIER_PREFIX}"
-echo "📋 日志文件: ${CLASSIFIER_LOG}"
-echo ""
-
-${PY3} train_classifier.py \
-  -o ${CLASSIFIER_PREFIX} \
-  -i ${DATASET_PATH} \
-  -c ${CATEGORY_FILE} \
-  -l ${CLASSIFIER_LOG} \
-  --dataset-type c3vd \
-  --num-points ${NUM_POINTS} \
-  --epochs ${EPOCHS_CLASSIFIER} \
-  --batch-size ${BATCH_SIZE} \
-  --workers 2 \
-  --device ${DEVICE} \
-  --drop-last \
-  --verbose \
-  --model-type attention \
-  --dim-k ${DIM_K} \
-  --num-attention-blocks ${NUM_ATTENTION_BLOCKS} \
-  --num-heads ${NUM_HEADS} \
-  --symfn ${SYMFN} \
-  --optimizer ${OPTIMIZER} \
-  --base-lr ${LEARNING_RATE} \
-  --warmup-epochs 5 \
-  --cosine-annealing
-
-# 检查分类器训练结果
-if [ $? -eq 0 ]; then
-    echo ""
-    echo "🎉 第一阶段：AttentionNet分类器训练完成!"
-    echo "📁 模型保存位置: ${CLASSIFIER_PREFIX}_*.pth"
-    echo "📋 日志文件: ${CLASSIFIER_LOG}"
-    
-    # 检查生成的分类器模型文件
-    echo ""
-    echo "📊 生成的分类器模型文件:"
-    ls -lh ${CLASSIFIER_PREFIX}_*.pth 2>/dev/null || echo "❌ 未找到分类器模型文件"
-    
-    # 查找特征权重文件
-    FEAT_WEIGHTS="${CLASSIFIER_PREFIX}_feat_best.pth"
-    if [ -f "${FEAT_WEIGHTS}" ]; then
-        echo "✅ 找到特征权重文件: ${FEAT_WEIGHTS}"
-    else
-        echo "❌ 警告: 未找到特征权重文件 ${FEAT_WEIGHTS}"
-        echo "   尝试查找其他权重文件..."
-        ls -la ${CLASSIFIER_PREFIX}_*.pth
-    fi
-    
-else
-    echo ""
-    echo "❌ 第一阶段：AttentionNet分类器训练失败!"
-    echo "请检查错误日志: ${CLASSIFIER_LOG}"
-    exit 1
-fi
 
 # =============================================
 # 第二阶段：训练AttentionNet-PointLK配准模型
@@ -231,12 +162,10 @@ echo "📋 日志文件: ${POINTLK_LOG}"
 echo "🔄 使用预训练权重: ${FEAT_WEIGHTS}"
 echo ""
 
-# 确保特征权重文件存在
-if [ ! -f "${FEAT_WEIGHTS}" ]; then
-    echo "❌ 错误: 特征权重文件不存在: ${FEAT_WEIGHTS}"
-    echo "   无法进行第二阶段训练"
-    exit 1
-fi
+
+
+# 移除第一阶段的分类器训练
+# 直接开始第二阶段的AttentionNet-PointLK配准模型训练
 
 # 检查是否有之前的快照文件用于续训
 RESUME_FILE="${POINTLK_PREFIX}_snap_best.pth"
@@ -270,8 +199,8 @@ ${PY3} train_pointlk.py \
   --num-heads ${NUM_HEADS} \
   --symfn ${SYMFN} \
   --pointnet tune \
-  --transfer-from ${FEAT_WEIGHTS} \
-  ${RESUME_ARG}
+  ${RESUME_ARG} \
+  --no-voxelization
 
 # 检查PointLK训练结果
 if [ $? -eq 0 ]; then

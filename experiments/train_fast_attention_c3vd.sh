@@ -152,83 +152,16 @@ echo "📋 第二阶段: PointLK配准训练 (~$((${EPOCHS_POINTLK} * 2))分钟)
 echo "⏱️  预估总训练时间: $(($((${EPOCHS_CLASSIFIER} + ${EPOCHS_POINTLK})) * 2))分钟"
 echo ""
 
-# =============================================
-# 第一阶段：训练Fast Point Attention分类器
-# =============================================
-echo "========== 第一阶段：训练Fast Point Attention分类器 =========="
-echo "🧠 开始训练Fast Point Attention分类器..."
-echo "📁 输出前缀: ${CLASSIFIER_PREFIX}"
-echo "📋 日志文件: ${CLASSIFIER_LOG}"
-echo ""
+# 移除第一阶段的分类器训练
+# 直接开始第二阶段的Fast Point Attention-PointLK配准模型训练
 
-${PY3} train_classifier.py \
-  -o ${CLASSIFIER_PREFIX} \
-  -i ${DATASET_PATH} \
-  -c ${CATEGORY_FILE} \
-  -l ${CLASSIFIER_LOG} \
-  --dataset-type c3vd \
-  --num-points ${NUM_POINTS} \
-  --epochs ${EPOCHS_CLASSIFIER} \
-  --batch-size ${BATCH_SIZE} \
-  --workers 4 \
-  --device ${DEVICE} \
-  --drop-last \
-  --verbose \
-  --model-type fast_attention \
-  --dim-k ${DIM_K} \
-  --num-fast-attention-blocks ${NUM_FAST_ATTENTION_BLOCKS} \
-  --fast-attention-scale ${FAST_ATTENTION_SCALE} \
-  --symfn ${SYMFN} \
-  --optimizer ${OPTIMIZER} \
-  --base-lr ${LEARNING_RATE} \
-  --warmup-epochs 5 \
-  --cosine-annealing
-
-# 检查分类器训练结果
-if [ $? -eq 0 ]; then
-    echo ""
-    echo "🎉 第一阶段：Fast Point Attention分类器训练完成!"
-    echo "📁 模型保存位置: ${CLASSIFIER_PREFIX}_*.pth"
-    echo "📋 日志文件: ${CLASSIFIER_LOG}"
-    
-    # 检查生成的分类器模型文件
-    echo ""
-    echo "📊 生成的分类器模型文件:"
-    ls -lh ${CLASSIFIER_PREFIX}_*.pth 2>/dev/null || echo "❌ 未找到分类器模型文件"
-    
-    # 查找特征权重文件
-    FEAT_WEIGHTS="${CLASSIFIER_PREFIX}_feat_best.pth"
-    if [ -f "${FEAT_WEIGHTS}" ]; then
-        echo "✅ 找到特征权重文件: ${FEAT_WEIGHTS}"
-    else
-        echo "❌ 警告: 未找到特征权重文件 ${FEAT_WEIGHTS}"
-        echo "   尝试查找其他权重文件..."
-        ls -la ${CLASSIFIER_PREFIX}_*.pth
-    fi
-    
-else
-    echo ""
-    echo "❌ 第一阶段：Fast Point Attention分类器训练失败!"
-    echo "请检查错误日志: ${CLASSIFIER_LOG}"
-    exit 1
-fi
-
-# =============================================
-# 第二阶段：训练Fast Point Attention-PointLK配准模型
-# =============================================
-echo ""
-echo "========== 第二阶段：训练Fast Point Attention-PointLK配准模型 =========="
-echo "🧠 开始训练Fast Point Attention-PointLK配准模型..."
-echo "📁 输出前缀: ${POINTLK_PREFIX}"
-echo "📋 日志文件: ${POINTLK_LOG}"
-echo "🔄 使用预训练权重: ${FEAT_WEIGHTS}"
-echo ""
-
-# 确保特征权重文件存在
-if [ ! -f "${FEAT_WEIGHTS}" ]; then
-    echo "❌ 错误: 特征权重文件不存在: ${FEAT_WEIGHTS}"
-    echo "   无法进行第二阶段训练"
-    exit 1
+# 检查是否有之前的快照文件用于续训
+RESUME_FILE="${POINTLK_PREFIX}_snap_best.pth"
+RESUME_ARG=""
+if [ -f "${RESUME_FILE}" ]; then
+    echo "✅ 发现之前的快照文件: ${RESUME_FILE}"
+    echo "📈 将继续之前的训练..."
+    RESUME_ARG="--resume ${RESUME_FILE}"
 fi
 
 ${PY3} train_pointlk.py \
@@ -254,7 +187,8 @@ ${PY3} train_pointlk.py \
   --fast-attention-scale ${FAST_ATTENTION_SCALE} \
   --symfn ${SYMFN} \
   --pointnet tune \
-  --transfer-from ${FEAT_WEIGHTS}
+  ${RESUME_ARG} \
+  --no-voxelization
 
 # 检查PointLK训练结果
 if [ $? -eq 0 ]; then

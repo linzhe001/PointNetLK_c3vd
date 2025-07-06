@@ -42,7 +42,7 @@ from ptlk import cformer  # 导入Cformer模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import ptlk.data.datasets as datasets
 from ptlk.data.datasets import ModelNet, ShapeNet2, C3VDDataset, C3VDset4tracking, C3VDset4tracking_test, VoxelizationConfig
-from ptlk.data.datasets import SinglePairDataset, SinglePairTrackingDataset  # 新增导入
+#from ptlk.data.datasets import SinglePairDataset, SinglePairTrackingDataset  # 新增导入
 from ptlk.data.datasets import C3VDset4tracking_test_random_sample, CADset4tracking_fixed_perturbation_random_sample
 import ptlk.data.transforms as transforms
 import ptlk.pointlk as pointlk

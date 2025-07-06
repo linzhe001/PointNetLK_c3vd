@@ -53,19 +53,19 @@ echo "使用设备: ${DEVICE}"
 echo "数据加载线程: ${WORKERS}"
 echo "================================"
 
-# 运行ICP测试
-${PY3} test_icp.py \
-  -o ${OUTFILE} \
-  -i ${DATASET_PATH} \
-  -c ${CATEGORY_FILE} \
-  --dataset-type c3vd \
-  --perturbation-dir ${PERTURBATION_DIR} \
-  --num-points ${NUM_POINTS} \
-  --max-iter ${MAX_ITER} \
-  --max-samples ${MAX_SAMPLES} \
-  --pair-mode ${PAIR_MODE} \
-  -j ${WORKERS} \
-  --device ${DEVICE}
+# # 运行ICP测试
+# ${PY3} test_icp.py \
+#   -o ${OUTFILE} \
+#   -i ${DATASET_PATH} \
+#   -c ${CATEGORY_FILE} \
+#   --dataset-type c3vd \
+#   --perturbation-dir ${PERTURBATION_DIR} \
+#   --num-points ${NUM_POINTS} \
+#   --max-iter ${MAX_ITER} \
+#   --max-samples ${MAX_SAMPLES} \
+#   --pair-mode ${PAIR_MODE} \
+#   -j ${WORKERS} \
+#   --device ${DEVICE}
 
 # =============================================================================
 # 第二轮测试：GT姿态文件
@@ -81,7 +81,6 @@ ${PY3} test_icp.py \
   --perturbations ${GT_POSES_FILE} \
   --num-points ${NUM_POINTS} \
   --max-iter ${MAX_ITER} \
-  --max-samples ${MAX_SAMPLES} \
   --pair-mode ${PAIR_MODE} \
   -j ${WORKERS} \
   --device ${DEVICE} 

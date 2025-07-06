@@ -27,20 +27,27 @@ def download():
 
 
 def load_data(partition):
-    download()
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(BASE_DIR, 'data')
+    # 支持环境变量指定HDF5路径
+    hdf5_root = os.environ.get('MODELNET40_HDF5_PATH', None)
+    if hdf5_root:
+        modelnet_dir = hdf5_root
+    else:
+        download()
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        modelnet_dir = os.path.join(BASE_DIR, 'data', 'modelnet40_ply_hdf5_2048')
     all_data = []
     all_label = []
-    for h5_name in glob.glob(os.path.join(DATA_DIR, 'modelnet40_ply_hdf5_2048', 'ply_data_%s*.h5' % partition)):
+    # 遍历 HDF5 文件
+    for h5_name in glob.glob(os.path.join(modelnet_dir, 'ply_data_%s*.h5' % partition)):
         f = h5py.File(h5_name)
         data = f['data'][:].astype('float32')
         label = f['label'][:].astype('int64')
         f.close()
         all_data.append(data)
         all_label.append(label)
-    all_data = np.concatenate(all_data, axis=0)
-    all_label = np.concatenate(all_label, axis=0)
+    # 合并所有数据
+    all_data = np.concatenate(all_data, axis=0) if all_data else np.array([])
+    all_label = np.concatenate(all_label, axis=0) if all_label else np.array([])
     return all_data, all_label
 
 

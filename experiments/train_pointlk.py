@@ -1105,10 +1105,11 @@ def get_datasets(args):
                         ptlk.data.transforms.RandomTransformSE3(args.mag, mag_randomly))
 
     elif args.dataset_type == 'c3vd':
-        transform = torchvision.transforms.Compose([
-            ptlk.data.transforms.OnUnitCube(),
-            ptlk.data.transforms.Resampler(args.num_points),
-        ])
+        # 移除transform，因为C3VD不再需要
+        # transform = torchvision.transforms.Compose([
+        #     # 移除归一化，因为C3VD不再需要
+        #     # ptlk.data.transforms.OnUnitCube(),
+        # ])
         
         # 配置体素化参数
         use_voxelization = getattr(args, 'use_voxelization', True)
@@ -1116,7 +1117,7 @@ def get_datasets(args):
         if use_voxelization:
             # 创建体素化配置
             voxel_config = ptlk.data.datasets.VoxelizationConfig(
-                voxel_size=getattr(args, 'voxel_size', 0.05),
+                voxel_size=getattr(args, 'voxel_size', 0.3),
                 voxel_grid_size=getattr(args, 'voxel_grid_size', 32),
                 max_voxel_points=getattr(args, 'max_voxel_points', 100),
                 max_voxels=getattr(args, 'max_voxels', 20000),
@@ -1130,7 +1131,7 @@ def get_datasets(args):
         c3vd_dataset = ptlk.data.datasets.C3VDDataset(
             source_root=os.path.join(args.dataset_path, 'C3VD_ply_source'),
             target_root=os.path.join(args.dataset_path, 'visible_point_cloud_ply_depth'),
-            transform=transform,
+            transform=None, # 移除transform
             pair_mode=getattr(args, 'pair_mode', 'one_to_one'),
             reference_name=getattr(args, 'reference_name', None)
         )

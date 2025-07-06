@@ -728,13 +728,24 @@ def get_datasets(args):
         # Create fixed transformation
         fixed_transform = FixedTransformSE3(perturbations, fmt_trans)
         
-        # 使用我们新创建的测试专用数据集
-        # Use our newly created test-specific dataset
-        testset = ptlk.data.datasets.C3VDset4tracking_test(
-            testdata, 
-            fixed_transform, 
-            use_joint_normalization=args.use_joint_normalization,
-            num_points=args.num_points)  # 传递点数参数 # Pass point number parameter
+        # GT 文件模式：使用固定扰动随机样本测试
+        if args.perturbations:
+            testset = ptlk.data.datasets.CADset4tracking_fixed_perturbation_random_sample(
+                c3vd_dataset,
+                perturbations,
+                fmt_trans=fmt_trans,
+                random_seed=42,
+                num_points=args.num_points,
+                use_voxelization=args.use_joint_normalization
+            )
+        else:
+            # 原有测试专用数据集
+            testset = ptlk.data.datasets.C3VDset4tracking_test(
+                testdata, 
+                fixed_transform, 
+                use_joint_normalization=args.use_joint_normalization,
+                num_points=args.num_points
+            )
         
         # 打印数据集信息
         # Print dataset information
@@ -753,7 +764,8 @@ def get_datasets(args):
         # 随机选择指定数量的样本进行测试
         # Randomly select specified number of samples for testing
         max_samples = args.max_samples
-        if len(testset) > max_samples:
+        # 仅在 perturbation_dir 模式下对子集做限制
+        if not args.perturbations and len(testset) > max_samples:
             print(f"数据集太大，随机选择{max_samples}个样本进行测试...")
             # 设置随机种子以确保可复现性
             # Set random seed to ensure reproducibility

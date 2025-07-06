@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 DCP 测试脚本: 支持 C3VD 和 ModelNet 数据集

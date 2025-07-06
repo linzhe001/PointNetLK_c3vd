@@ -202,67 +202,67 @@ fi
 # =============================================================================
 # 第一轮测试：处理gt文件夹中的扰动文件
 # =============================================================================
-# echo "========== 第一轮测试：角度扰动文件 =========="
-# echo "🎯 测试目标: 处理 gt 文件夹中的扰动文件"
-# echo "📂 扰动目录: ${PERTURBATION_DIR}"
-# echo "📁 结果存储: 各角度子目录"
-# echo ""
+echo "========== 第一轮测试：角度扰动文件 =========="
+echo "🎯 测试目标: 处理 gt 文件夹中的扰动文件"
+echo "📂 扰动目录: ${PERTURBATION_DIR}"
+echo "📁 结果存储: 各角度子目录"
+echo ""
 
-# # 第一轮测试的输出前缀
-# TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
+# 第一轮测试的输出前缀
+TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
 
-# # 运行第一轮测试
-# echo "🚀 开始第一轮测试..."
-# ${PY3} test_pointlk.py \
-#   -o ${TEST_OUTPUT_PREFIX_ROUND1} \
-#   -i ${DATASET_PATH} \
-#   -c ${CATEGORY_FILE} \
-#   -l ${TEST_LOG} \
-#   --dataset-type modelnet \
-#   --num-points ${NUM_POINTS} \
-#   --max-iter ${MAX_ITER} \
-#   --delta ${DELTA} \
-#   --device ${DEVICE} \
-#   --max-samples ${MAX_SAMPLES_ROUND1} \
-#   --perturbation-dir ${PERTURBATION_DIR} \
-#   --model-type mamba3d \
-#   --dim-k ${DIM_K} \
-#   --num-mamba-blocks ${NUM_MAMBA_BLOCKS} \
-#   --d-state ${D_STATE} \
-#   --expand ${EXPAND} \
-#   --symfn ${SYMFN} \
-#   --pretrained ${MAMBA_MODEL} \
-#   ${VISUALIZE_PARAMS}
+# 运行第一轮测试
+echo "🚀 开始第一轮测试..."
+${PY3} test_pointlk.py \
+  -o ${TEST_OUTPUT_PREFIX_ROUND1} \
+  -i ${DATASET_PATH} \
+  -c ${CATEGORY_FILE} \
+  -l ${TEST_LOG} \
+  --dataset-type modelnet \
+  --num-points ${NUM_POINTS} \
+  --max-iter ${MAX_ITER} \
+  --delta ${DELTA} \
+  --device ${DEVICE} \
+  --max-samples ${MAX_SAMPLES_ROUND1} \
+  --perturbation-dir ${PERTURBATION_DIR} \
+  --model-type mamba3d \
+  --dim-k ${DIM_K} \
+  --num-mamba-blocks ${NUM_MAMBA_BLOCKS} \
+  --d-state ${D_STATE} \
+  --expand ${EXPAND} \
+  --symfn ${SYMFN} \
+  --pretrained ${MAMBA_MODEL} \
+  ${VISUALIZE_PARAMS}
 
-# # 检查第一轮测试结果
-# if [ $? -eq 0 ]; then
-#     echo ""
-#     echo "✅ 第一轮测试（角度扰动）完成!"
+# 检查第一轮测试结果
+if [ $? -eq 0 ]; then
+    echo ""
+    echo "✅ 第一轮测试（角度扰动）完成!"
     
-#     # 统计第一轮结果
-#     ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
-#     echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
-#     if [ ${ANGLE_DIRS} -gt 0 ]; then
-#         echo "📋 角度目录列表:"
-#         find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
-#         if [ ${ANGLE_DIRS} -gt 5 ]; then
-#             echo "   ... (共${ANGLE_DIRS}个角度目录)"
-#         fi
-#     fi
-# else
-#     echo ""
-#     echo "❌ 第一轮测试（角度扰动）失败!"
-#     echo "请检查错误日志: ${TEST_LOG}"
+    # 统计第一轮结果
+    ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | wc -l)
+    echo "📊 生成的角度目录数: ${ANGLE_DIRS}"
+    if [ ${ANGLE_DIRS} -gt 0 ]; then
+        echo "📋 角度目录列表:"
+        find "${TEST_RESULTS_DIR}" -type d -name "angle_*" | sort | head -5
+        if [ ${ANGLE_DIRS} -gt 5 ]; then
+            echo "   ... (共${ANGLE_DIRS}个角度目录)"
+        fi
+    fi
+else
+    echo ""
+    echo "❌ 第一轮测试（角度扰动）失败!"
+    echo "请检查错误日志: ${TEST_LOG}"
     
-#     # 显示最后几行错误信息
-#     if [ -f "${TEST_LOG}" ]; then
-#         echo ""
-#         echo "📋 最新错误信息:"
-#         tail -10 "${TEST_LOG}"
-#     fi
+    # 显示最后几行错误信息
+    if [ -f "${TEST_LOG}" ]; then
+        echo ""
+        echo "📋 最新错误信息:"
+        tail -10 "${TEST_LOG}"
+    fi
     
-#     exit 1
-# fi
+    exit 1
+fi
 
 # =============================================================================
 # 第二轮测试：处理GT姿态文件

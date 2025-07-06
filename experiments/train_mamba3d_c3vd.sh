@@ -3,7 +3,7 @@
 #$ -l h_vmem=32G            
 #$ -l h_rt=174000  # 增加到4小时以支持恢复训练
 #$ -l gpu=true
-
+#$ -l gpu_type=a6000
 #$ -pe gpu 1
 #$ -N ljiang_resume_mamba3d_c3vd
 #$ -o /SAN/medic/MRpcr/logs/f_mamba3d_c3vd_resume_output.log
@@ -61,8 +61,9 @@ MAG=0.8 # 用于PointLK的变换幅度
 
 # ===== 恢复训练配置 =====
 # 设置要恢复的模型路径 - 请根据实际情况修改这些路径
-RESUME_CHECKPOINT=""  # 如果要从checkpoint恢复完整训练状态，设置checkpoint路径
-PRETRAINED_MODEL="/SAN/medic/MRpcr/results/mamba3d_c3vd/mamba3d_pointlk_resume_0620_model_best.pth"  # 要继续训练的配准模型权重路径
+# 更新权重文件路径
+RESUME_CHECKPOINT="/SAN/medic/MRpcr/results/mamba3d_c3vd/mamba3d_pointlk_resume_0704_2214_model_best.pth"
+PRETRAINED_MODEL=""  # 已使用 checkpoint 恢复，清空预训练模型路径
 
 # 体素化配置参数
 USE_VOXELIZATION=true           # 是否启用体素化（true/false）
@@ -94,12 +95,7 @@ if [ "${PAIR_MODE}" = "scene_reference" ] && [ -n "${REFERENCE_NAME}" ]; then
 fi
 
 # 构建体素化参数字符串
-VOXELIZATION_PARAMS=""
-if [ "${USE_VOXELIZATION}" = "true" ]; then
-    VOXELIZATION_PARAMS="--use-voxelization --voxel-size ${VOXEL_SIZE} --voxel-grid-size ${VOXEL_GRID_SIZE} --max-voxel-points ${MAX_VOXEL_POINTS} --max-voxels ${MAX_VOXELS} --min-voxel-points-ratio ${MIN_VOXEL_POINTS_RATIO}"
-else
-    VOXELIZATION_PARAMS="--no-voxelization"
-fi
+VOXELIZATION_PARAMS="--no-voxelization"
 
 # 定义输出路径
 POINTLK_PREFIX="/SAN/medic/MRpcr/results/mamba3d_c3vd/mamba3d_pointlk_resume_${DATE_TAG}"
@@ -130,14 +126,7 @@ else
 fi
 echo ""
 echo "🔧 体素化配置:"
-echo "   - 启用体素化: ${USE_VOXELIZATION}"
-if [ "${USE_VOXELIZATION}" = "true" ]; then
-    echo "   - 体素大小: ${VOXEL_SIZE}"
-    echo "   - 体素网格尺寸: ${VOXEL_GRID_SIZE}"
-    echo "   - 每个体素最大点数: ${MAX_VOXEL_POINTS}"
-    echo "   - 最大体素数量: ${MAX_VOXELS}"
-    echo "   - 最小体素点数比例: ${MIN_VOXEL_POINTS_RATIO}"
-fi
+echo "   - 启用体素化: false"
 echo ""
 echo "🔧 Mamba3D参数:"
 echo "   - 特征维度: ${DIM_K}"
@@ -256,9 +245,6 @@ PRETRAINED_PARAM=""
 if [ -n "${RESUME_CHECKPOINT}" ] && [ -f "${RESUME_CHECKPOINT}" ]; then
     RESUME_PARAM="--resume ${RESUME_CHECKPOINT}"
     echo "🔄 从Checkpoint恢复完整训练状态: ${RESUME_CHECKPOINT}"
-elif [ -n "${PRETRAINED_MODEL}" ] && [ -f "${PRETRAINED_MODEL}" ]; then
-    PRETRAINED_PARAM="--pretrained ${PRETRAINED_MODEL}"
-    echo "🔄 从预训练模型继续训练: ${PRETRAINED_MODEL}"
 else
     echo "⚠️  从头开始训练 (未指定恢复路径)"
 fi
@@ -275,6 +261,8 @@ ${PY3} train_pointlk.py \
   --dataset-type c3vd \
   --num-points ${NUM_POINTS} \
   --mag ${MAG} \
+  --delta 0.0001 \
+  --learn-delta \
   --device ${DEVICE} \
   --batch-size ${BATCH_SIZE} \
   --epochs ${EPOCHS_POINTLK} \
@@ -295,8 +283,7 @@ ${PY3} train_pointlk.py \
   --expand ${EXPAND} \
   --symfn ${SYMFN} \
   ${VOXELIZATION_PARAMS} \
-  ${RESUME_PARAM} \
-  ${PRETRAINED_PARAM}
+  ${RESUME_PARAM}
 
 # 检查PointLK训练结果
 if [ $? -eq 0 ]; then

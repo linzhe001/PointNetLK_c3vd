@@ -56,8 +56,9 @@ class PointLK(torch.nn.Module):
 
     @staticmethod
     def do_forward(net, p0, p1, maxiter=10, xtol=1.0e-7, p0_zero_mean=True, p1_zero_mean=True):
-        a0 = torch.eye(4).view(1, 4, 4).expand(p0.size(0), 4, 4).to(p0) # [B, 4, 4]
-        a1 = torch.eye(4).view(1, 4, 4).expand(p1.size(0), 4, 4).to(p1) # [B, 4, 4]
+        # 构造变换矩阵并 clone，避免 expand 导致的内存共享
+        a0 = torch.eye(4).view(1, 4, 4).expand(p0.size(0), 4, 4).to(p0).clone()  # [B, 4, 4]
+        a1 = torch.eye(4).view(1, 4, 4).expand(p1.size(0), 4, 4).to(p1).clone()  # [B, 4, 4]
         if p0_zero_mean:
             p0_m = p0.mean(dim=1) # [B, N, 3] -> [B, 3]
             a0[:, 0:3, 3] = p0_m
