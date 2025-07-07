@@ -3,6 +3,7 @@
 #$ -l h_vmem=32G            
 #$ -l h_rt=36000  # 1小时测试时间
 #$ -l gpu=true
+#$ -l gpu_type=a6000
 #$ -pe gpu 1
 #$ -N ljiang_test_attention_c3vd
 #$ -o /SAN/medic/MRpcr/logs/f_test_attention_c3vd_output.log
@@ -31,6 +32,22 @@ CATEGORY_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/experiments/sampledata/c3vd.txt"
 NUM_POINTS=1024
 DEVICE="cuda:0"
 DATE_TAG=$(date +"%m%d")
+
+# 体素化配置参数（与训练保持一致）
+USE_VOXELIZATION=true           # 是否启用体素化（true/false）
+VOXEL_SIZE=4                 # 体素大小 (适合医学点云)
+VOXEL_GRID_SIZE=32              # 体素网格尺寸
+MAX_VOXEL_POINTS=100            # 每个体素最大点数
+MAX_VOXELS=20000                # 最大体素数量
+MIN_VOXEL_POINTS_RATIO=0.1      # 最小体素点数比例
+
+# 构建体素化参数字符串
+VOXELIZATION_PARAMS=""
+if [ "${USE_VOXELIZATION}" = "true" ]; then
+    VOXELIZATION_PARAMS="--use-voxelization --voxel-size ${VOXEL_SIZE} --voxel-grid-size ${VOXEL_GRID_SIZE} --max-voxel-points ${MAX_VOXEL_POINTS} --max-voxels ${MAX_VOXELS} --min-voxel-points-ratio ${MIN_VOXEL_POINTS_RATIO}"
+else
+    VOXELIZATION_PARAMS="--no-voxelization"
+fi
 
 # Attention 模型配置（与训练保持一致）
 DIM_K=1024
@@ -89,7 +106,7 @@ ${PY3} test_pointlk.py \
   --num-heads ${NUM_HEADS} \
   --symfn ${SYMFN} \
   --pretrained ${ATT_MODEL} \
-  --no-voxelization \
+  ${VOXELIZATION_PARAMS} \
   --perturbation-dir ${PERTURBATION_DIR}
 if [ $? -ne 0 ]; then
     echo "❌ 第一轮测试失败"
@@ -113,6 +130,7 @@ ${PY3} test_pointlk.py \
   --max-iter ${MAX_ITER} \
   --delta ${DELTA} \
   --device ${DEVICE} \
+  --max-samples ${MAX_SAMPLES_ROUND2} \
   --pair-mode one_to_one \
   --perturbation-file ${GT_POSES_FILE} \
   --model-type attention \
@@ -121,7 +139,7 @@ ${PY3} test_pointlk.py \
   --num-heads ${NUM_HEADS} \
   --symfn ${SYMFN} \
   --pretrained ${ATT_MODEL} \
-  --no-voxelization
+  ${VOXELIZATION_PARAMS}
 if [ $? -ne 0 ]; then
     echo "❌ 第二轮测试失败"
     exit 1

@@ -74,10 +74,29 @@ MAX_SAMPLES_ROUND2=0     # 第二轮测试：GT姿态文件使用所有样本（
 VISUALIZE_PERT="" # 如需可视化，设置为 "--visualize-pert pert_010.csv pert_020.csv"
 VISUALIZE_SAMPLES=3
 
-# 模型路径（使用指定的权重文件）
-MAMBA3D_MODEL="/SAN/medic/MRpcr/results/mamba3d_c3vd/mamba3d_pointlk_resume_0620_1709_model_best.pth"
+# 模型路径（自动查找最新）
+MODEL_DIR="/SAN/medic/MRpcr/results/mamba3d_c3vd"
+MAMBA3D_MODEL_PREFIX="${MODEL_DIR}/mamba3d_pointlk_${DATE_TAG}"
+MAMBA3D_MODEL="${MAMBA3D_MODEL_PREFIX}_model_best.pth"
+
+if [ ! -f "${MAMBA3D_MODEL}" ]; then
+    echo "⚠️ 未找到今日Mamba3D模型: ${MAMBA3D_MODEL}"
+    # 修改查找逻辑以匹配文件名 (mamba3d_pointlk_... 或 mamba3d_pointlk_resume_...)
+    LATEST_MODEL=$(find ${MODEL_DIR} -name "mamba3d_pointlk_*_model_best.pth" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -f2- -d' ')
+    if [ -n "${LATEST_MODEL}" ] && [ -f "${LATEST_MODEL}" ]; then
+        MAMBA3D_MODEL="${LATEST_MODEL}"
+        echo "✅ 找到最新Mamba3D模型: ${MAMBA3D_MODEL}"
+    else
+        echo "❌ 错误: 未找到任何Mamba3D模型文件!"
+        exit 1
+    fi
+else
+    echo "✅ 使用今日Mamba3D模型: ${MAMBA3D_MODEL}"
+fi
+
 # 提取模型前缀用于日志记录
-MAMBA3D_MODEL_PREFIX=$(echo "${MAMBA3D_MODEL}" | sed 's/_model_best\.pth$//')
+MAMBA3D_MODEL_PREFIX=$(basename "${MAMBA3D_MODEL}" | sed 's/_model_best\.pth$//')
+
 
 # 检查指定的模型文件是否存在
 if [ ! -f "${MAMBA3D_MODEL}" ]; then
@@ -306,12 +325,6 @@ echo "🚀 开始第二轮测试..."
 echo "📄 直接使用GT姿态文件: ${GT_POSES_FILE}"
 echo "🎯 GT_POSES模式将自动激活（每个扰动随机选择一个测试样本）"
 
-# 构建第二轮测试的MAX_SAMPLES参数
-MAX_SAMPLES_PARAM_ROUND2=""
-if [ ${MAX_SAMPLES_ROUND2} -gt 0 ]; then
-    MAX_SAMPLES_PARAM_ROUND2="--max-samples ${MAX_SAMPLES_ROUND2}"
-fi
-
 # 运行第二轮测试 - 直接使用GT姿态文件
 ${PY3} test_pointlk.py \
   -o ${TEST_OUTPUT_PREFIX_ROUND2} \
@@ -323,7 +336,7 @@ ${PY3} test_pointlk.py \
   --max-iter ${MAX_ITER} \
   --delta ${DELTA} \
   --device ${DEVICE} \
-  ${MAX_SAMPLES_PARAM_ROUND2} \
+  --max-samples ${MAX_SAMPLES_ROUND2} \
   --pair-mode ${PAIR_MODE} \
   ${REFERENCE_PARAM} \
   --perturbation-file ${GT_POSES_FILE} \

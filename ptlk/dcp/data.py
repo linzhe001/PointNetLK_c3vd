@@ -66,7 +66,7 @@ def jitter_pointcloud(pointcloud, sigma=0.01, clip=0.05):
 
 
 class ModelNet40(Dataset):
-    def __init__(self, num_points, partition='train', gaussian_noise=False, unseen=False, factor=4):
+    def __init__(self, num_points, partition='train', gaussian_noise=False, unseen=False, factor=4, perturbations=None):
         self.data, self.label = load_data(partition)
         self.num_points = num_points
         self.partition = partition
@@ -74,6 +74,7 @@ class ModelNet40(Dataset):
         self.unseen = unseen
         self.label = self.label.squeeze()
         self.factor = factor
+        self.perturbations = perturbations
         if self.unseen:
             ######## simulate testing on first 20 categories while training on last 20 categories
             if self.partition == 'test':
@@ -87,11 +88,23 @@ class ModelNet40(Dataset):
         pointcloud = self.data[item][:self.num_points]
         if self.gaussian_noise:
             pointcloud = jitter_pointcloud(pointcloud)
-        if self.partition != 'train':
-            np.random.seed(item)
-        anglex = np.random.uniform() * np.pi / self.factor
-        angley = np.random.uniform() * np.pi / self.factor
-        anglez = np.random.uniform() * np.pi / self.factor
+
+        if self.perturbations is not None:
+            # 使用来自文件的固定扰动
+            # Use fixed perturbation from file
+            pert = self.perturbations[item % len(self.perturbations)]
+            anglex, angley, anglez = pert[0], pert[1], pert[2]
+            translation_ab = pert[3:]
+        else:
+            # 保持原有的随机扰动逻辑
+            # Keep original random perturbation logic
+            if self.partition != 'train':
+                np.random.seed(item)
+            anglex = np.random.uniform() * np.pi / self.factor
+            angley = np.random.uniform() * np.pi / self.factor
+            anglez = np.random.uniform() * np.pi / self.factor
+            translation_ab = np.array([np.random.uniform(-0.5, 0.5), np.random.uniform(-0.5, 0.5),
+                                       np.random.uniform(-0.5, 0.5)])
 
         cosx = np.cos(anglex)
         cosy = np.cos(angley)
@@ -110,8 +123,6 @@ class ModelNet40(Dataset):
                         [0, 0, 1]])
         R_ab = Rx.dot(Ry).dot(Rz)
         R_ba = R_ab.T
-        translation_ab = np.array([np.random.uniform(-0.5, 0.5), np.random.uniform(-0.5, 0.5),
-                                   np.random.uniform(-0.5, 0.5)])
         translation_ba = -R_ba.dot(translation_ab)
 
         pointcloud1 = pointcloud.T

@@ -1117,7 +1117,7 @@ def get_datasets(args):
         if use_voxelization:
             # 创建体素化配置
             voxel_config = ptlk.data.datasets.VoxelizationConfig(
-                voxel_size=getattr(args, 'voxel_size', 0.3),
+                voxel_size=getattr(args, 'voxel_size', 1),
                 voxel_grid_size=getattr(args, 'voxel_grid_size', 32),
                 max_voxel_points=getattr(args, 'max_voxel_points', 100),
                 max_voxels=getattr(args, 'max_voxels', 20000),

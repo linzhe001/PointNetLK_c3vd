@@ -651,6 +651,12 @@ class C3VDset4tracking(torch.utils.data.Dataset):
                 processed_source = voxel_down_sample_numpy(source_clean, self.num_points)
                 processed_target = voxel_down_sample_numpy(target_clean, self.num_points)
 
+            # 新增: 确保点数等于 self.num_points
+            if processed_source.shape[0] != self.num_points:
+                processed_source = voxel_down_sample_numpy(processed_source, self.num_points)
+            if processed_target.shape[0] != self.num_points:
+                processed_target = voxel_down_sample_numpy(processed_target, self.num_points)
+
             # 根据 use_voxelization 分支归一化
             if self.use_voxelization and voxelize_point_clouds is not None:
                 # 单独归一化 source
@@ -726,14 +732,13 @@ class C3VDset4tracking_test(C3VDset4tracking):
     def __getitem__(self, index):
         """获取测试数据项，同时保存原始点云信息"""
         try:
-            # 获取原始点云对
-            source, target, _ = self.dataset[index]  # 忽略原始的igt
-            
-            # 转换为numpy数组进行处理
+            # 1. 获取原始点云对
+            source, target, _ = self.dataset[index]
+
+            # 2. 转换为numpy数组并清理无效点
             source_np = source.numpy() if isinstance(source, torch.Tensor) else source
             target_np = target.numpy() if isinstance(target, torch.Tensor) else target
             
-            # 数据清理：移除无效点
             source_mask = np.isfinite(source_np).all(axis=1)
             target_mask = np.isfinite(target_np).all(axis=1)
             
@@ -742,28 +747,33 @@ class C3VDset4tracking_test(C3VDset4tracking):
             
             if len(source_clean) < 100 or len(target_clean) < 100:
                 raise ValueError(f"点云在索引{index}处清理后点数不足100个")
-            
-            # 选择处理策略：复杂体素化 vs Open3D风格VoxelGrid降采样
+
+            # 3. 选择处理策略：复杂体素化 vs Open3D风格VoxelGrid降采样
             if self.use_voxelization and voxelize_point_clouds is not None:
                 try:
                     processed_source, processed_target = voxelize_point_clouds(
                         source_clean, target_clean, self.num_points, self.voxel_config, fallback_to_sampling=True)
                 except Exception as e:
                     print(f"体素化处理失败，回退到重采样: {e}")
-                    source_tensor = torch.from_numpy(source_clean).float()
-                    target_tensor = torch.from_numpy(target_clean).float()
-                    processed_source = self.resampler(source_tensor).numpy()
-                    processed_target = self.resampler(target_tensor).numpy()
+                    source_tensor_tmp = torch.from_numpy(source_clean).float()
+                    target_tensor_tmp = torch.from_numpy(target_clean).float()
+                    processed_source = self.resampler(source_tensor_tmp).numpy()
+                    processed_target = self.resampler(target_tensor_tmp).numpy()
             else:
                 processed_source = voxel_down_sample_numpy(source_clean, self.num_points)
                 processed_target = voxel_down_sample_numpy(target_clean, self.num_points)
-            
+
+            # 4. 确保点数等于 self.num_points (关键修复)
+            if processed_source.shape[0] != self.num_points:
+                processed_source = voxel_down_sample_numpy(processed_source, self.num_points)
+            if processed_target.shape[0] != self.num_points:
+                processed_target = voxel_down_sample_numpy(processed_target, self.num_points)
+
             # 转换回torch tensor
             source_tensor = torch.from_numpy(processed_source).float()
             target_tensor = torch.from_numpy(processed_target).float()
             
-            # 分别归一化
-            # 源点云归一化
+            # 5. 分别归一化
             source_min_vals = source_tensor.min(dim=0)[0]
             source_max_vals = source_tensor.max(dim=0)[0]
             source_center = (source_min_vals + source_max_vals) / 2
@@ -772,7 +782,6 @@ class C3VDset4tracking_test(C3VDset4tracking):
                 raise ValueError(f"源点云归一化尺度过小，索引{index}: {source_scale}")
             source_normalized = (source_tensor - source_center) / source_scale
             
-            # 目标点云归一化
             target_min_vals = target_tensor.min(dim=0)[0]
             target_max_vals = target_tensor.max(dim=0)[0]
             target_center = (target_min_vals + target_max_vals) / 2
@@ -780,160 +789,68 @@ class C3VDset4tracking_test(C3VDset4tracking):
             if target_scale < 1e-10:
                 raise ValueError(f"目标点云归一化尺度过小，索引{index}: {target_scale}")
             target_normalized = (target_tensor - target_center) / target_scale
+            
+            # 6. 应用刚性变换
+            # 在测试模式下，rigid_transform 是一个特殊的类，它会根据索引应用固定的扰动
+            transformed_source = self.rigid_transform(source_normalized)
+            igt = self.rigid_transform.igt
 
-        except Exception as e:
-            print(f"处理索引{index}的点云时出错: {str(e)}")
-            raise
-
-        try:
-            # 获取原始点云对（从随机选择的样本）
-            source, target, _ = self.dataset[sample_idx]  # 忽略原始的igt
-
-            # 转换为numpy数组进行处理
-            source_np = source.numpy() if isinstance(source, torch.Tensor) else source
-            target_np = target.numpy() if isinstance(target, torch.Tensor) else target
-
-            # 数据清理：移除无效点
-            source_mask = np.isfinite(source_np).all(axis=1)
-            target_mask = np.isfinite(target_np).all(axis=1)
-
-            source_clean = source_np[source_mask]
-            target_clean = target_np[target_mask]
-
-            if len(source_clean) < 100 or len(target_clean) < 100:
-                raise ValueError(f"点云在样本索引{sample_idx}处清理后点数不足100个")
-
-            # 选择处理策略：复杂体素化 vs Open3D风格VoxelGrid降采样
-            if self.use_voxelization and voxelize_point_clouds is not None:
-                try:
-                    processed_source, processed_target = voxelize_point_clouds(
-                        source_clean, target_clean, self.num_points, self.voxel_config, fallback_to_sampling=True)
-                except Exception as e:
-                    print(f"体素化处理失败，回退到重采样: {e}")
-                    source_tensor = torch.from_numpy(source_clean).float()
-                    target_tensor = torch.from_numpy(target_clean).float()
-                    processed_source = self.resampler(source_tensor).numpy()
-                    processed_target = self.resampler(target_tensor).numpy()
-            else:
-                processed_source = voxel_down_sample_numpy(source_clean, self.num_points)
-                processed_target = voxel_down_sample_numpy(target_clean, self.num_points)
-
-            # 转换回torch tensor
-            source_tensor = torch.from_numpy(processed_source).float()
-            target_tensor = torch.from_numpy(processed_target).float()
-
-            # 分别归一化
-            # 源点云归一化
-            source_min_vals = source_tensor.min(dim=0)[0]
-            source_max_vals = source_tensor.max(dim=0)[0]
-            source_center = (source_min_vals + source_max_vals) / 2
-            source_scale = (source_max_vals - source_min_vals).max()
-            if source_scale < 1e-10:
-                raise ValueError(f"源点云归一化尺度过小，样本索引{sample_idx}: {source_scale}")
-            source_normalized = (source_tensor - source_center) / source_scale
-
-            # 目标点云归一化
-            target_min_vals = target_tensor.min(dim=0)[0]
-            target_max_vals = target_tensor.max(dim=0)[0]
-            target_center = (target_min_vals + target_max_vals) / 2
-            target_scale = (target_max_vals - target_min_vals).max()
-            if target_scale < 1e-10:
-                raise ValueError(f"目标点云归一化尺度过小，样本索引{sample_idx}: {target_scale}")
-            target_normalized = (target_tensor - target_center) / target_scale
-
-            # 应用特定的扰动（而不是随机变换）
-            perturbation = self.perturbations[index]
-            twist = torch.from_numpy(numpy.array(perturbation)).contiguous().view(1, 6)
-            x = twist.to(source_normalized)
-
-            # 应用扰动变换
-            if not getattr(self.rigid_transform, 'fmt_trans', False):
-                # x: twist-vector
-                g = se3.exp(x).to(source_normalized)  # [1, 4, 4]
-                transformed_source = se3.transform(g, source_normalized)
-                igt = g.squeeze(0)  # igt: source_normalized -> transformed_source
-            else:
-                # x: rotation and translation
-                w = x[:, 0:3]
-                q = x[:, 3:6]
-                R = so3.exp(w).to(source_normalized)  # [1, 3, 3]
-                g = torch.zeros(1, 4, 4)
-                g[:, 3, 3] = 1
-                g[:, 0:3, 0:3] = R  # rotation
-                g[:, 0:3, 3] = q    # translation
-                transformed_source = se3.transform(g, source_normalized)
-                igt = g.squeeze(0)  # igt: source_normalized -> transformed_source
-
-            # 收集原始点云信息（基于随机选择的样本）
-            # 尝试获取原始点云文件路径
+            # 7. 收集原始点云信息
             if hasattr(self.dataset, 'indices') and self.original_pairs:
-                # 如果是子集，需要映射索引
-                orig_index = self.dataset.indices[sample_idx]
+                orig_index = self.dataset.indices[index]
                 source_file, target_file = self.original_pairs[orig_index]
                 scene = self.original_pair_scenes[orig_index] if self.original_pair_scenes else "unknown"
-            elif self.original_pairs and sample_idx < len(self.original_pairs):
-                # 直接使用索引
-                source_file, target_file = self.original_pairs[sample_idx]
-                scene = self.original_pair_scenes[sample_idx] if self.original_pair_scenes else "unknown"
+            elif self.original_pairs and index < len(self.original_pairs):
+                source_file, target_file = self.original_pairs[index]
+                scene = self.original_pair_scenes[index] if self.original_pair_scenes else "unknown"
             else:
-                source_file = None
-                target_file = None
-                scene = "unknown"
+                source_file, target_file, scene = None, None, "unknown"
 
-            # 尝试提取场景名称和序列号
             scene_name = scene
             source_seq = "0000"
-
             if source_file:
                 try:
-                    # 标准化路径分隔符
                     norm_path = source_file.replace('\\', '/')
-
-                    # 如果未能从数据集获取场景名称，则从路径中提取
                     if scene_name == "unknown" and 'C3VD_ply_source' in norm_path:
-                        # 查找C3VD_ply_source之后的第一个目录
                         parts = norm_path.split('/')
-                        idx = [i for i, part in enumerate(parts) if part == 'C3VD_ply_source']
-                        if idx and idx[0] + 1 < len(parts):
-                            scene_name = parts[idx[0] + 1]
-
-                    # 提取源序号
+                        idx_part = [i for i, part in enumerate(parts) if part == 'C3VD_ply_source']
+                        if idx_part and idx_part[0] + 1 < len(parts):
+                            scene_name = parts[idx_part[0] + 1]
                     basename = os.path.basename(source_file)
-
-                    # 假设源文件名格式为 "XXXX_depth_pcd.ply"
                     if basename.endswith("_depth_pcd.ply") and basename[:4].isdigit():
                         source_seq = basename[:4]
                     else:
-                        # 尝试从文件名中提取数字序列
                         import re
-                        numbers = re.findall(r'\d+', basename)
+                        numbers = re.findall(r'\\d+', basename)
                         if numbers:
                             source_seq = numbers[0].zfill(4)
                 except Exception as e:
                     print(f"Warning: Error extracting scene name: {str(e)}")
-
-            # 创建唯一标识符（包含扰动索引）
+            
             identifier = f"{scene_name}_{source_seq}_pert{index:04d}"
 
-            # 保存点云信息（使用测试索引而不是样本索引）
+            # 使用 current_perturbation_index 可能是 test_pointlk.py 里的一个自定义实现，这里做兼容
+            pert_idx = index
+            if hasattr(self.rigid_transform, 'current_perturbation_index'):
+                pert_idx = self.rigid_transform.current_perturbation_index - 1
+
             self.cloud_info[index] = {
                 'identifier': identifier,
                 'scene': scene_name,
                 'sequence': source_seq,
                 'source_file': source_file,
                 'target_file': target_file,
-                'sample_index': sample_idx,  # 记录使用的随机样本索引
-                'perturbation_index': index,  # 记录扰动索引
+                'sample_index': index,
+                'perturbation_index': pert_idx,
                 'original_source': source_normalized.clone(),
                 'original_target': target_normalized.clone(),
                 'igt': igt.clone() if igt is not None else None
             }
 
-            # 返回：模板、变换后的源、变换矩阵
             return target_normalized, transformed_source, igt
 
         except Exception as e:
-            print(f"处理扰动索引{index}（样本索引{sample_idx}）的点云时出错: {str(e)}")
+            print(f"处理索引{index}的点云时出错: {str(e)}")
             raise
 
     def get_cloud_info(self, index):
@@ -970,11 +887,12 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
         # 调用父类构造函数
         super().__init__(dataset, rigid_transform, num_points, use_voxelization, voxel_config)
         
-        # 检查是否有扰动数据
-        if not hasattr(rigid_transform, 'perturbations'):
+        # 从 rigid_transform 获取扰动数据
+        if hasattr(rigid_transform, 'perturbations'):
+            self.perturbations = rigid_transform.perturbations
+        else:
             raise ValueError("rigid_transform must have perturbations attribute for random sampling mode")
         
-        self.perturbations = rigid_transform.perturbations
         self.original_dataset_size = len(dataset)
         
         # 设置随机种子以确保可复现性
@@ -1005,14 +923,13 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
         sample_idx = self.sample_indices[index]
         
         try:
-            # 获取原始点云对（从随机选择的样本）
-            source, target, _ = self.dataset[sample_idx]  # 忽略原始的igt
+            # 1. 获取原始点云对（从随机选择的样本）
+            source, target, _ = self.dataset[sample_idx]
             
-            # 转换为numpy数组进行处理
+            # 2. 转换为numpy数组并清理无效点
             source_np = source.numpy() if isinstance(source, torch.Tensor) else source
             target_np = target.numpy() if isinstance(target, torch.Tensor) else target
             
-            # 数据清理：移除无效点
             source_mask = np.isfinite(source_np).all(axis=1)
             target_mask = np.isfinite(target_np).all(axis=1)
             
@@ -1022,27 +939,32 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
             if len(source_clean) < 100 or len(target_clean) < 100:
                 raise ValueError(f"点云在样本索引{sample_idx}处清理后点数不足100个")
             
-            # 选择处理策略：复杂体素化 vs Open3D风格VoxelGrid降采样
+            # 3. 选择处理策略：复杂体素化 vs Open3D风格VoxelGrid降采样
             if self.use_voxelization and voxelize_point_clouds is not None:
                 try:
                     processed_source, processed_target = voxelize_point_clouds(
                         source_clean, target_clean, self.num_points, self.voxel_config, fallback_to_sampling=True)
                 except Exception as e:
                     print(f"体素化处理失败，回退到重采样: {e}")
-                    source_tensor = torch.from_numpy(source_clean).float()
-                    target_tensor = torch.from_numpy(target_clean).float()
-                    processed_source = self.resampler(source_tensor).numpy()
-                    processed_target = self.resampler(target_tensor).numpy()
+                    source_tensor_tmp = torch.from_numpy(source_clean).float()
+                    target_tensor_tmp = torch.from_numpy(target_clean).float()
+                    processed_source = self.resampler(source_tensor_tmp).numpy()
+                    processed_target = self.resampler(target_tensor_tmp).numpy()
             else:
                 processed_source = voxel_down_sample_numpy(source_clean, self.num_points)
                 processed_target = voxel_down_sample_numpy(target_clean, self.num_points)
             
+            # 4. 确保点数等于 self.num_points (关键修复)
+            if processed_source.shape[0] != self.num_points:
+                processed_source = voxel_down_sample_numpy(processed_source, self.num_points)
+            if processed_target.shape[0] != self.num_points:
+                processed_target = voxel_down_sample_numpy(processed_target, self.num_points)
+
             # 转换回torch tensor
             source_tensor = torch.from_numpy(processed_source).float()
             target_tensor = torch.from_numpy(processed_target).float()
             
-            # 分别归一化
-            # 源点云归一化
+            # 5. 分别归一化
             source_min_vals = source_tensor.min(dim=0)[0]
             source_max_vals = source_tensor.max(dim=0)[0]
             source_center = (source_min_vals + source_max_vals) / 2
@@ -1051,7 +973,6 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
                 raise ValueError(f"源点云归一化尺度过小，样本索引{sample_idx}: {source_scale}")
             source_normalized = (source_tensor - source_center) / source_scale
             
-            # 目标点云归一化
             target_min_vals = target_tensor.min(dim=0)[0]
             target_max_vals = target_tensor.max(dim=0)[0]
             target_center = (target_min_vals + target_max_vals) / 2
@@ -1060,95 +981,73 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
                 raise ValueError(f"目标点云归一化尺度过小，样本索引{sample_idx}: {target_scale}")
             target_normalized = (target_tensor - target_center) / target_scale
             
-            # 应用特定的扰动（而不是随机变换）
+            # 6. 应用特定的扰动
             perturbation = self.perturbations[index]
             twist = torch.from_numpy(numpy.array(perturbation)).contiguous().view(1, 6)
             x = twist.to(source_normalized)
             
-            # 应用扰动变换
             if not getattr(self.rigid_transform, 'fmt_trans', False):
-                # x: twist-vector
-                g = se3.exp(x).to(source_normalized)  # [1, 4, 4]
+                g = se3.exp(x).to(source_normalized)
                 transformed_source = se3.transform(g, source_normalized)
-                igt = g.squeeze(0)  # igt: source_normalized -> transformed_source
+                igt = g.squeeze(0)
             else:
-                # x: rotation and translation
                 w = x[:, 0:3]
                 q = x[:, 3:6]
-                R = so3.exp(w).to(source_normalized)  # [1, 3, 3]
+                R = so3.exp(w).to(source_normalized)
                 g = torch.zeros(1, 4, 4)
                 g[:, 3, 3] = 1
-                g[:, 0:3, 0:3] = R  # rotation
-                g[:, 0:3, 3] = q    # translation
+                g[:, 0:3, 0:3] = R
+                g[:, 0:3, 3] = q
                 transformed_source = se3.transform(g, source_normalized)
-                igt = g.squeeze(0)  # igt: source_normalized -> transformed_source
+                igt = g.squeeze(0)
 
-            # 收集原始点云信息（基于随机选择的样本）
-            # 尝试获取原始点云文件路径
+            # 7. 收集原始点云信息
             if hasattr(self.dataset, 'indices') and self.original_pairs:
-                # 如果是子集，需要映射索引
                 orig_index = self.dataset.indices[sample_idx]
                 source_file, target_file = self.original_pairs[orig_index]
                 scene = self.original_pair_scenes[orig_index] if self.original_pair_scenes else "unknown"
             elif self.original_pairs and sample_idx < len(self.original_pairs):
-                # 直接使用索引
                 source_file, target_file = self.original_pairs[sample_idx]
                 scene = self.original_pair_scenes[sample_idx] if self.original_pair_scenes else "unknown"
             else:
-                source_file = None
-                target_file = None
-                scene = "unknown"
+                source_file, target_file, scene = None, None, "unknown"
 
-            # 尝试提取场景名称和序列号
             scene_name = scene
             source_seq = "0000"
-
             if source_file:
                 try:
-                    # 标准化路径分隔符
                     norm_path = source_file.replace('\\', '/')
-
-                    # 如果未能从数据集获取场景名称，则从路径中提取
                     if scene_name == "unknown" and 'C3VD_ply_source' in norm_path:
-                        # 查找C3VD_ply_source之后的第一个目录
                         parts = norm_path.split('/')
-                        idx = [i for i, part in enumerate(parts) if part == 'C3VD_ply_source']
-                        if idx and idx[0] + 1 < len(parts):
-                            scene_name = parts[idx[0] + 1]
-
-                    # 提取源序号
+                        idx_part = [i for i, part in enumerate(parts) if part == 'C3VD_ply_source']
+                        if idx_part and idx_part[0] + 1 < len(parts):
+                            scene_name = parts[idx_part[0] + 1]
                     basename = os.path.basename(source_file)
-
-                    # 假设源文件名格式为 "XXXX_depth_pcd.ply"
                     if basename.endswith("_depth_pcd.ply") and basename[:4].isdigit():
                         source_seq = basename[:4]
                     else:
-                        # 尝试从文件名中提取数字序列
                         import re
-                        numbers = re.findall(r'\d+', basename)
+                        numbers = re.findall(r'\\d+', basename)
                         if numbers:
                             source_seq = numbers[0].zfill(4)
                 except Exception as e:
                     print(f"Warning: Error extracting scene name: {str(e)}")
 
-            # 创建唯一标识符（包含扰动索引）
             identifier = f"{scene_name}_{source_seq}_pert{index:04d}"
 
-            # 保存点云信息（使用测试索引而不是样本索引）
             self.cloud_info[index] = {
                 'identifier': identifier,
                 'scene': scene_name,
                 'sequence': source_seq,
                 'source_file': source_file,
                 'target_file': target_file,
-                'sample_index': sample_idx,  # 记录使用的随机样本索引
-                'perturbation_index': index,  # 记录扰动索引
+                'sample_index': sample_idx,
+                'perturbation_index': index,
                 'original_source': source_normalized.clone(),
                 'original_target': target_normalized.clone(),
                 'igt': igt.clone() if igt is not None else None
             }
 
-            # 返回：模板、变换后的源、变换矩阵
             return target_normalized, transformed_source, igt
 
         except Exception as e:

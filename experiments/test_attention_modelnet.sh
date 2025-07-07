@@ -118,6 +118,7 @@ ${PY3} test_pointlk.py \
   --max-iter ${MAX_ITER} \
   --delta ${DELTA} \
   --device ${DEVICE} \
+  --max-samples ${MAX_SAMPLES_ROUND2} \
   --perturbation-file ${GT_POSES_FILE} \
   --model-type attention \
   --dim-k ${DIM_K} \

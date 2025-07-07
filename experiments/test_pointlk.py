@@ -1959,112 +1959,68 @@ def get_datasets(args):
                     # 检查是否有扰动数据
                     if self.perturbations is None or len(self.perturbations) == 0:
                         print("警告: 没有扰动数据，返回原始点云")
-                        self.igt = torch.eye(4).to(tensor.device)
                         return tensor
                     
-                    # 根据数据集类型选择扰动
-                    if hasattr(self, 'current_perturbation_index'):
-                        # 对于固定扰动模式，使用当前索引
-                        pert_idx = self.current_perturbation_index % len(self.perturbations)
+                    # 获取当前扰动
+                    if self.current_perturbation_index >= len(self.perturbations):
+                        self.current_perturbation_index = 0  # 重置索引
+                    
+                    twist = torch.from_numpy(numpy.array(self.perturbations[self.current_perturbation_index])).contiguous().view(1, 6)
+                    self.current_perturbation_index += 1  # 更新索引
+                    
+                    x = twist.to(tensor)
+                    
+                    if not self.fmt_trans:
+                        # x: twist-vector
+                        g = ptlk.se3.exp(x).to(tensor) # [1, 4, 4]
+                        p1 = ptlk.se3.transform(g, tensor)
+                        self.igt = g.squeeze(0) # igt: p0 -> p1
                     else:
-                        # 对于随机扰动模式，随机选择
-                        pert_idx = torch.randint(0, len(self.perturbations), (1,)).item()
+                        # x: rotation and translation
+                        w = x[:, 0:3]
+                        q = x[:, 3:6]
+                        R = ptlk.so3.exp(w).to(tensor) # [1, 3, 3]
+                        g = torch.zeros(1, 4, 4)
+                        g[:, 3, 3] = 1
+                        g[:, 0:3, 0:3] = R # rotation
+                        g[:, 0:3, 3] = q   # translation
+                        p1 = ptlk.se3.transform(g, tensor)
+                        self.igt = g.squeeze(0) # igt: p0 -> p1
                     
-                    # 获取扰动参数
-                    perturbation = self.perturbations[pert_idx]
-                    
-                    # 确保perturbation是numpy数组或可转换为tensor
-                    if isinstance(perturbation, (list, tuple)):
-                        perturbation = torch.tensor(perturbation, dtype=torch.float32)
-                    elif isinstance(perturbation, np.ndarray):
-                        perturbation = torch.from_numpy(perturbation).float()
-                    elif not isinstance(perturbation, torch.Tensor):
-                        perturbation = torch.tensor(perturbation, dtype=torch.float32)
-                    
-                    # 将perturbation移到正确的设备
-                    perturbation = perturbation.to(tensor.device)
-                    
-                    # 确保perturbation形状正确
-                    if perturbation.dim() == 1:
-                        if len(perturbation) == 6:
-                            # 6D扰动 [rx, ry, rz, tx, ty, tz]
-                            rotation_params = perturbation[:3]  # [rx, ry, rz]
-                            translation_params = perturbation[3:6]  # [tx, ty, tz]
-                        elif len(perturbation) == 3:
-                            # 只有旋转参数
-                            rotation_params = perturbation
-                            translation_params = torch.zeros(3).to(tensor.device)
-                        else:
-                            print(f"警告: 不支持的扰动维度 {len(perturbation)}，使用单位变换")
-                            rotation_params = torch.zeros(3).to(tensor.device)
-                            translation_params = torch.zeros(3).to(tensor.device)
-                    else:
-                        print(f"警告: 扰动形状不正确 {perturbation.shape}，使用单位变换")
-                        rotation_params = torch.zeros(3).to(tensor.device)
-                        translation_params = torch.zeros(3).to(tensor.device)
-                    
-                    # 生成旋转矩阵（使用Rodrigues公式）
-                    angle = torch.norm(rotation_params)
-                    if angle < 1e-8:
-                        rotation_matrix = torch.eye(3).to(tensor.device)
-                    else:
-                        axis = rotation_params / angle
-                        cos_angle = torch.cos(angle)
-                        sin_angle = torch.sin(angle)
-                        
-                        # Rodrigues旋转公式
-                        K = torch.tensor([
-                            [0, -axis[2], axis[1]],
-                            [axis[2], 0, -axis[0]],
-                            [-axis[1], axis[0], 0]
-                        ]).to(tensor.device)
-                        
-                        rotation_matrix = torch.eye(3).to(tensor.device) + sin_angle * K + (1 - cos_angle) * torch.mm(K, K)
-                    
-                    # 构建4x4变换矩阵
-                    transform_matrix = torch.eye(4).to(tensor.device)
-                    transform_matrix[:3, :3] = rotation_matrix
-                    transform_matrix[:3, 3] = translation_params
-                    
-                    # 保存逆变换矩阵（用于后续误差计算）
-                    self.igt = transform_matrix
-                    
-                    # 应用变换到点云
-                    # 添加齐次坐标
-                    ones = torch.ones(tensor.shape[0], 1).to(tensor.device)
-                    homogeneous_points = torch.cat([tensor, ones], dim=1)  # [N, 4]
-                    
-                    # 应用变换
-                    transformed_homogeneous = torch.mm(homogeneous_points, transform_matrix.t())  # [N, 4]
-                    
-                    # 提取3D坐标
-                    transformed_tensor = transformed_homogeneous[:, :3]
-                    
-                    return transformed_tensor
-                    
+                    return p1
                 except Exception as e:
-                    print(f"变换应用失败: {e}")
-                    print(f"使用单位变换，返回原始点云")
-                    self.igt = torch.eye(4).to(tensor.device)
+                    print(f"Error during rigid transform: {e}")
+                    # 在变换失败时返回原始张量
                     return tensor
         
-        # 创建变换对象
-        # Create transform object
-        rigid_transform = SimpleRigidTransform(perturbations, fmt_trans=False)
-        
+        rigid_transform = SimpleRigidTransform(perturbations, fmt_trans)
+
         # 根据是否为gt_poses模式选择不同的数据集类
-        # Choose different dataset class based on whether it's gt_poses mode
         if is_gt_poses_mode:
             print(f"使用C3VD随机选择模式...")
             testset = ptlk.data.datasets.C3VDset4tracking_test_random_sample(
                 testdata, rigid_transform, num_points=args.num_points,
                 use_voxelization=use_voxelization, voxel_config=voxel_config, random_seed=42)
         else:
+            # 这是标准测试模式 - 使用 C3VDset4tracking_test
+            print(f"使用C3D标准测试模式...")
             testset = ptlk.data.datasets.C3VDset4tracking_test(
                 testdata, rigid_transform, num_points=args.num_points,
                 use_voxelization=use_voxelization, voxel_config=voxel_config)
-        
-        print(f"Created test set with {len(testset)} perturbation samples")
+
+    else:
+        raise ValueError('Unsupported dataset type: {}'.format(args.dataset_type))
+
+    # 应用最大样本数限制
+    if hasattr(args, 'max_samples') and args.max_samples is not None and args.max_samples > 0:
+        if len(testset) > args.max_samples:
+            print(f"限制测试集样本数到 {args.max_samples} 个（原样本数：{len(testset)}）")
+            testset = torch.utils.data.Subset(testset, range(args.max_samples))
+            print(f"限制后样本数: {len(testset)}")
+        else:
+            print(f"测试集样本数 {len(testset)} 小于或等于最大样本数限制 {args.max_samples}，使用全部样本")
+    else:
+        print(f"未设置最大样本数限制，或限制为0，使用全部测试集样本：{len(testset)} 个")
 
     return testset
 

@@ -3,6 +3,7 @@
 #$ -l h_vmem=32G            
 #$ -l h_rt=36000  # 1小时测试时间
 #$ -l gpu=true
+#$ -l gpu_type=a6000
 #$ -pe gpu 1
 #$ -N ljiang_test_fast_attention_c3vd
 #$ -o /SAN/medic/MRpcr/logs/f_test_fast_attention_c3vd_output.log
@@ -113,6 +114,7 @@ ${PY3} test_pointlk.py \
   --max-iter ${MAX_ITER} \
   --delta ${DELTA} \
   --device ${DEVICE} \
+  --max-samples ${MAX_SAMPLES_ROUND2} \
   --pair-mode one_to_one \
   --perturbation-file ${GT_POSES_FILE} \
   --model-type fast_attention \
