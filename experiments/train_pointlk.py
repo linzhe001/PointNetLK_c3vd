@@ -24,9 +24,16 @@ import traceback
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
 import ptlk
 from ptlk import attention_v1
-from ptlk import mamba3d_v1  # 导入Mamba3D模块
+# 按需导入 Mamba 相关模块，避免在不使用时导入缺失的模块
+# from ptlk import mamba3d_v1  # 导入Mamba3D模块
+# from ptlk import mamba3d_v2
+# from ptlk import mamba3d_v3
+# from ptlk import mamba3d_v4
 from ptlk import fast_point_attention  # 导入快速点注意力模块
 from ptlk import cformer  # 导入Cformer模块
+# 删除对抗模块导入
+# from ptlk.adversarial import GradReverse, DomainDiscriminator # 导入对抗模块
+import torch.nn.functional as F
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -70,8 +77,8 @@ def options(argv=None):
                         help='symmetric function (default: max)')
     
     # 添加模型选择参数 (与train_classifier.py保持一致)
-    parser.add_argument('--model-type', default='pointnet', choices=['pointnet', 'attention', 'mamba3d', 'fast_attention', 'cformer'],
-                        help='选择模型类型: pointnet、attention、mamba3d、fast_attention或cformer (默认: pointnet)')
+    parser.add_argument('--model-type', default='pointnet', choices=['pointnet', 'attention', 'mamba3d', 'mamba3d_v2', 'fast_attention', 'cformer', 'mamba3d_v3', 'mamba3d_v4'],
+                        help='选择模型类型: pointnet、attention、mamba3d、mamba3d_v2、fast_attention、cformer、mamba3d_v3、mamba3d_v4 (默认: pointnet)')
     
     # 添加attention模型特定参数 (与train_classifier.py保持一致)
     parser.add_argument('--num-attention-blocks', default=3, type=int,
@@ -164,8 +171,35 @@ def options(argv=None):
     parser.add_argument('--cosine-annealing', action='store_true',
                         help='使用余弦退火学习率策略')
 
+    # 添加全局特征一致性损失权重参数
+    parser.add_argument('--global-consistency-weight', default=0.1, type=float,
+                        metavar='W', help='全局特征一致性损失的权重 (默认: 0.1)')
+
+    # 删除领域对抗和几何对应损失的参数
+    # parser.add_argument('--adversarial-lambda', default=0.1, type=float,
+    #                     metavar='L', help='领域对抗损失的权重 (默认: 0.1)')
+    # parser.add_argument('--correspondence-lambda', default=0.05, type=float,
+    #                     metavar='L', help='特征对应损失的权重 (默认: 0.05)')
+
     args = parser.parse_args(argv)
     return args
+
+# 删除辅助函数: 计算特征空间的Chamfer Distance
+# def feature_chamfer_loss(feat_a, feat_b):
+#     """
+#     计算特征空间的Chamfer distance。
+#     feat_a: [B, N, K]
+#     feat_b: [B, M, K]
+#     """
+#     dist_matrix = torch.cdist(feat_a, feat_b, p=2)  # [B, N, M]
+    
+#     # 对feat_a中的每个点，找到feat_b中最近的点
+#     dist_a_to_b, _ = torch.min(dist_matrix, dim=2)
+#     # 对feat_b中的每个点，找到feat_a中最近的点
+#     dist_b_to_a, _ = torch.min(dist_matrix, dim=1)
+    
+#     loss = torch.mean(dist_a_to_b) + torch.mean(dist_b_to_a)
+#     return loss
 
 def main(args):
     # dataset
@@ -358,7 +392,7 @@ def run(args, trainset, testset, action):
     
     
     # Optimizer
-    min_loss = float('inf')
+    best_val_loss = float('inf')  # 初始化最佳验证损失
     learnable_params = filter(lambda p: p.requires_grad, model.parameters())
     if args.optimizer == 'Adam':
         optimizer = torch.optim.Adam(learnable_params, lr=0.0001, weight_decay=1e-4, betas=(0.9, 0.999), eps=1e-8)
@@ -368,18 +402,18 @@ def run(args, trainset, testset, action):
     # 恢复训练状态
     best_epoch = 0
     if checkpoint is not None:
-        min_loss = checkpoint.get('min_loss', float('inf'))
+        best_val_loss = checkpoint.get('min_loss', float('inf'))  # 加载最佳验证损失
         best_epoch = checkpoint.get('best_epoch', 0)
         # 只有当checkpoint包含优化器状态时才恢复
         if 'optimizer' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             print(f"✅ 成功恢复训练状态:")
-            print(f"   - 当前最佳损失: {min_loss}")
+            print(f"   - 当前最佳验证损失: {best_val_loss}")
             print(f"   - 当前最佳epoch: {best_epoch}")
             print(f"   - 优化器状态已恢复")
         else:
             print(f"⚠️  部分恢复训练状态:")
-            print(f"   - 当前最佳损失: {min_loss}")
+            print(f"   - 当前最佳验证损失: {best_val_loss}")
             print(f"   - 当前最佳epoch: {best_epoch}")
             print(f"   - 优化器状态将重新初始化（使用默认学习率）")
     
@@ -497,25 +531,27 @@ def run(args, trainset, testset, action):
         
         epoch_time = time.time() - epoch_start
         
-        # 首先定义一个变量来跟踪best epoch的数值
-        is_best = val_loss < min_loss
-        if is_best:
-            best_epoch = epoch + 1  # 更新最佳epoch
-        min_loss = min(val_loss, min_loss)
+        # 基于最低验证损失的模型保存策略
+        is_best = False
+        if val_loss < best_val_loss:
+            is_best = True
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            print(f"[Save] Found better model with validation loss: {val_loss:.4f}")
 
         # 获取当前学习率
         current_lr = optimizer.param_groups[0]['lr']
 
-        print(f"[Time] Epoch {epoch+1}: {epoch_time:.2f} sec | Loss: {running_loss:.4f} | Validation: {val_loss:.4f}")
-        print(f"[Info] Best epoch: {best_epoch}, Current LR: {current_lr:.6f}")
+        print(f"[Time] Epoch {epoch+1}: {epoch_time:.2f} sec | Loss: {running_loss:.4f} | Val Loss: {val_loss:.4f} | Val Geo Loss: {val_info.get('loss_g', 0):.4f}")
+        print(f"[Info] Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}, Current LR: {current_lr:.6f}")
         
         # 修改日志输出，增加best_epoch和current_lr
-        LOGGER.info('epoch, %04d, %f, %f, %f, %f, %04d, %f', 
-                   epoch + 1, running_loss, val_loss, running_info, val_info, best_epoch, current_lr)
+        LOGGER.info('epoch, %04d, %f, %f, %f, %f, %04d, %f, %f', 
+                   epoch + 1, running_loss, val_loss, running_info.get('loss_g', -1), val_info.get('loss_g', -1), best_epoch, current_lr, best_val_loss)
         snap = {'epoch': epoch + 1,
                 'model': model.state_dict(),
-                'min_loss': min_loss,
-                'best_epoch': best_epoch,  # 保存最佳epoch信息
+                'min_loss': best_val_loss,  # 使用最佳验证损失
+                'best_epoch': best_epoch,   # 保存最佳epoch信息
                 'optimizer' : optimizer.state_dict(),}
         
         if is_best:
@@ -570,6 +606,14 @@ class Action:
         self.num_proxy_points = getattr(args, 'num_proxy_points', 8)
         self.num_blocks = getattr(args, 'num_blocks', 2)
         
+        # 添加全局特征一致性损失权重
+        self.global_consistency_weight = args.global_consistency_weight
+        
+        # 删除领域对抗和几何对应参数
+        # self.adversarial_lambda = args.adversarial_lambda
+        # self.correspondence_lambda = args.correspondence_lambda
+        # self.discriminator = None
+        
         # 聚合函数设置 (与train_classifier.py保持一致)
         self.sym_fn = None
         if args.model_type == 'attention':
@@ -581,15 +625,66 @@ class Action:
             else:
                 self.sym_fn = attention_v1.symfn_attention_pool  # attention特有的聚合
         elif args.model_type == 'mamba3d':
-            # 为Mamba3D模型设置聚合函数
-            if args.symfn == 'max':
-                self.sym_fn = mamba3d_v1.symfn_max
-            elif args.symfn == 'avg':
-                self.sym_fn = mamba3d_v1.symfn_avg
-            elif args.symfn == 'selective':
-                self.sym_fn = mamba3d_v1.symfn_selective
-            else:
-                self.sym_fn = mamba3d_v1.symfn_max  # 默认使用最大池化
+            # 动态导入并为Mamba3D模型设置聚合函数
+            try:
+                from ptlk import mamba3d_v1
+                if args.symfn == 'max':
+                    self.sym_fn = mamba3d_v1.symfn_max
+                elif args.symfn == 'avg':
+                    self.sym_fn = mamba3d_v1.symfn_avg
+                elif args.symfn == 'selective':
+                    self.sym_fn = mamba3d_v1.symfn_selective
+                else:
+                    self.sym_fn = mamba3d_v1.symfn_max  # 默认使用最大池化
+            except ImportError:
+                print("警告: 无法导入mamba3d_v1模块，将在创建模型时处理")
+                self.sym_fn = None
+        elif self.model_type == 'mamba3d_v2':
+            # 动态导入 Mamba3D_v2 模块，防止未导入报错
+            try:
+                from ptlk import mamba3d_v2
+                # 为 Mamba3D_v2 模型设置聚合函数
+                if args.symfn == 'max':
+                    self.sym_fn = mamba3d_v2.symfn_max
+                elif args.symfn == 'avg':
+                    self.sym_fn = mamba3d_v2.symfn_avg
+                elif args.symfn == 'selective':
+                    self.sym_fn = mamba3d_v2.symfn_selective
+                else:
+                    self.sym_fn = mamba3d_v2.symfn_max  # 默认使用最大池化
+            except ImportError:
+                print("警告: 无法导入mamba3d_v2模块，将在创建模型时处理")
+                self.sym_fn = None
+        elif self.model_type == 'mamba3d_v3':
+            # 动态导入Mamba3D_v3模块
+            try:
+                from ptlk import mamba3d_v3
+                if args.symfn == 'max':
+                    self.sym_fn = mamba3d_v3.symfn_max
+                elif args.symfn == 'avg':
+                    self.sym_fn = mamba3d_v3.symfn_avg
+                elif args.symfn == 'selective':
+                    self.sym_fn = mamba3d_v3.symfn_selective
+                else:
+                    self.sym_fn = mamba3d_v3.symfn_max
+            except ImportError:
+                print("警告: 无法导入mamba3d_v3模块，将在创建模型时处理")
+                self.sym_fn = None
+        elif self.model_type == 'mamba3d_v4':
+            # 动态导入Mamba3D_v4模块
+            try:
+                from ptlk import mamba3d_v4
+                if args.symfn == 'max':
+                    self.sym_fn = mamba3d_v4.symfn_max
+                elif args.symfn == 'avg':
+                    self.sym_fn = mamba3d_v4.symfn_avg
+                elif args.symfn == 'selective':
+                    self.sym_fn = mamba3d_v4.symfn_selective
+                else:
+                    self.sym_fn = mamba3d_v4.symfn_max
+            except ImportError:
+                print("警告: 无法导入mamba3d_v4模块，将在创建模型时处理")
+                self.sym_fn = None
         elif args.model_type == 'fast_attention':
             # 为快速点注意力模型设置聚合函数
             if args.symfn == 'max':
@@ -628,6 +723,9 @@ class Action:
         self._loss_type = 1 # see. self.compute_loss()
 
     def create_model(self):
+        # 删除判别器初始化
+        # self.discriminator = DomainDiscriminator(input_dim=self.dim_k)
+
         if self.model_type == 'attention':
             # 创建attention模型
             ptnet = attention_v1.AttentionNet_features(
@@ -647,24 +745,117 @@ class Action:
                     print(f"加载attention预训练权重失败: {e}")
                     print("继续使用随机初始化权重")
         elif self.model_type == 'mamba3d':
-            # 创建Mamba3D模型
-            ptnet = mamba3d_v1.Mamba3D_features(
-                dim_k=self.dim_k, 
-                sym_fn=self.sym_fn,
-                scale=1,
-                num_mamba_blocks=self.num_mamba_blocks,
-                d_state=self.d_state,
-                expand=self.expand
-            )
-            # 支持从Mamba3D分类器加载预训练权重
-            if self.transfer_from and os.path.isfile(self.transfer_from):
-                try:
-                    pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
-                    ptnet.load_state_dict(pretrained_dict)
-                    print(f"成功加载Mamba3D预训练权重: {self.transfer_from}")
-                except Exception as e:
-                    print(f"加载Mamba3D预训练权重失败: {e}")
-                    print("继续使用随机初始化权重")
+            # 动态导入Mamba3D模块
+            try:
+                from ptlk import mamba3d_v1
+                # 如果sym_fn为None，重新设置
+                if self.sym_fn is None:
+                    self.sym_fn = mamba3d_v1.symfn_max  # 默认使用最大池化
+                # 创建Mamba3D模型
+                ptnet = mamba3d_v1.Mamba3D_features(
+                    dim_k=self.dim_k, 
+                    sym_fn=self.sym_fn,
+                    scale=1,
+                    num_mamba_blocks=self.num_mamba_blocks,
+                    d_state=self.d_state,
+                    expand=self.expand
+                )
+                # 支持从Mamba3D分类器加载预训练权重
+                if self.transfer_from and os.path.isfile(self.transfer_from):
+                    try:
+                        pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                        ptnet.load_state_dict(pretrained_dict)
+                        print(f"成功加载Mamba3D预训练权重: {self.transfer_from}")
+                    except Exception as e:
+                        print(f"加载Mamba3D预训练权重失败: {e}")
+                        print("继续使用随机初始化权重")
+            except ImportError as e:
+                print(f"错误: 无法导入Mamba3D模块: {e}")
+                print("请确保已安装mamba_ssm库或使用其他模型类型")
+                raise
+        elif self.model_type == 'mamba3d_v2':
+            # 动态导入Mamba3D模块
+            try:
+                from ptlk import mamba3d_v2
+                # 如果sym_fn为None，重新设置
+                if self.sym_fn is None:
+                    self.sym_fn = mamba3d_v2.symfn_max  # 默认使用最大池化
+                # 创建Mamba3D模型
+                ptnet = mamba3d_v2.Mamba3D_features(
+                    dim_k=self.dim_k, 
+                    sym_fn=self.sym_fn,
+                    scale=1,
+                    num_mamba_blocks=self.num_mamba_blocks,
+                    d_state=self.d_state,
+                    expand=self.expand
+                )
+                # 支持从Mamba3D分类器加载预训练权重
+                if self.transfer_from and os.path.isfile(self.transfer_from):
+                    try:
+                        pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                        ptnet.load_state_dict(pretrained_dict)
+                        print(f"成功加载Mamba3D预训练权重: {self.transfer_from}")
+                    except Exception as e:
+                        print(f"加载Mamba3D预训练权重失败: {e}")
+                        print("继续使用随机初始化权重")
+            except ImportError as e:
+                print(f"错误: 无法导入Mamba3D模块: {e}")
+                print("请确保已安装mamba_ssm库或使用其他模型类型")
+                raise
+        elif self.model_type == 'mamba3d_v3':
+            # 动态导入Mamba3D_v3模块
+            try:
+                from ptlk import mamba3d_v3
+                # 如果sym_fn为None，重新设置
+                if self.sym_fn is None:
+                    self.sym_fn = mamba3d_v3.symfn_max  # 默认使用最大池化
+                # 创建Mamba3D_v3 (SE-Net)模型
+                ptnet = mamba3d_v3.Mamba3D_features(
+                    dim_k=self.dim_k, 
+                    sym_fn=self.sym_fn,
+                    scale=1,
+                    num_mamba_blocks=self.num_mamba_blocks,
+                    d_state=self.d_state,
+                    expand=self.expand
+                )
+                if self.transfer_from and os.path.isfile(self.transfer_from):
+                    try:
+                        pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                        ptnet.load_state_dict(pretrained_dict)
+                        print(f"成功加载Mamba3D_v3预训练权重: {self.transfer_from}")
+                    except Exception as e:
+                        print(f"加载Mamba3D_v3预训练权重失败: {e}")
+            except ImportError as e:
+                print(f"错误: 无法导入Mamba3D_v3模块: {e}")
+                print("请确保已安装mamba_ssm库或使用其他模型类型")
+                raise
+        elif self.model_type == 'mamba3d_v4':
+            # 动态导入Mamba3D_v4模块
+            try:
+                from ptlk import mamba3d_v4
+                # 如果sym_fn为None，重新设置
+                if self.sym_fn is None:
+                    self.sym_fn = mamba3d_v4.symfn_max  # 默认使用最大池化
+                # 创建Mamba3D_v4 (CBAM)模型
+                ptnet = mamba3d_v4.Mamba3D_features(
+                    dim_k=self.dim_k, 
+                    sym_fn=self.sym_fn,
+                    scale=1,
+                    num_mamba_blocks=self.num_mamba_blocks,
+                    d_state=self.d_state,
+                    expand=self.expand
+                )
+                if self.transfer_from and os.path.isfile(self.transfer_from):
+                    try:
+                        pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                        ptnet.load_state_dict(pretrained_dict)
+                        print(f"成功加载Mamba3D_v4预训练权重: {self.transfer_from}")
+                    except Exception as e:
+                        print(f"加载Mamba3D_v4预训练权重失败: {e}")
+            except ImportError as e:
+                print(f"错误: 无法导入Mamba3D_v4模块: {e}")
+                print("请确保已安装mamba_ssm库或使用其他模型类型")
+                raise
         elif self.model_type == 'fast_attention':
             # 创建快速点注意力模型
             ptnet = fast_point_attention.FastPointAttention_features(
@@ -722,8 +913,15 @@ class Action:
 
     def train_1(self, model, trainloader, optimizer, device):
         model.train()
+        # 删除判别器相关代码
+        # self.discriminator.to(device) # 确保判别器在正确的设备上
+        # self.discriminator.train()
+
         vloss = 0.0
         gloss = 0.0
+        # 删除对应和领域损失
+        # closs = 0.0 # Correspondence Loss
+        # dloss = 0.0 # Domain Loss
         count = 0
         nan_batch_count = 0
         nan_loss_count = 0
@@ -763,7 +961,10 @@ class Action:
             
             try:
                 loss, loss_g = self.compute_loss(model, data, device)
-                print("损失计算完成: loss={:.4f}, loss_g={:.4f}".format(loss.item(), loss_g.item()))
+
+                print("损失计算完成: loss={:.4f}, loss_g={:.4f}".format(
+                    loss.item(), loss_g.item()))
+
             except Exception as e:
                 print("前向传播或损失计算出错: {}".format(e))
                 traceback.print_exc()
@@ -848,6 +1049,9 @@ class Action:
             # Only normal batches count toward total loss and count
             vloss += loss.item()
             gloss += loss_g.item()
+            # 删除对应和领域损失累计
+            # closs += loss_corr.item()
+            # dloss += loss_domain.item()
             count += 1
             
             # Record total batch time
@@ -876,7 +1080,7 @@ class Action:
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                 }
-                torch.save(temp_checkpoint, '/SAN/medic/MRpcr/results/mamba3d_c3vd/mamba3d_pointlk_temp_checkpoint.pth')
+                torch.save(temp_checkpoint, '/SAN/medic/MRpcr/results/mamba_v3_se_c3vd/mamba3d_pointlk_temp_checkpoint.pth')
 
         # Display NaN batch statistics
         if nan_batch_count > 0:
@@ -887,6 +1091,9 @@ class Action:
         # Safely calculate averages
         ave_vloss = float(vloss)/count if count > 0 else float('inf')
         ave_gloss = float(gloss)/count if count > 0 else float('inf')
+        # 删除对应和领域损失平均值计算
+        # ave_closs = float(closs)/count if count > 0 else float('inf')
+        # ave_dloss = float(dloss)/count if count > 0 else float('inf')
         
         # Calculate average times
         avg_batch = sum(batch_times) / len(batch_times) if batch_times else 0
@@ -897,14 +1104,22 @@ class Action:
         print(f"\n性能统计:")
         print(f"有效批次: {count}/{len(trainloader)} ({count/len(trainloader)*100:.2f}%)")
         print(f"平均批次时间: {avg_batch:.4f} 秒 = 数据加载: {avg_data:.4f} 秒 + 前向传播: {avg_forward:.4f} 秒 + 反向传播: {avg_backward:.4f} 秒")
-        print(f"训练结果: 损失={ave_vloss:.4f}, 特征损失={ave_gloss:.4f}")
+        print(f"训练结果: 总损失={ave_vloss:.4f}, 几何损失={ave_gloss:.4f}")
         
-        return ave_vloss, ave_gloss
+        # 删除对应和领域损失返回
+        return ave_vloss, {'loss_g': ave_gloss}
 
     def eval_1(self, model, testloader, device):
         model.eval()
+        # 删除判别器相关代码
+        # self.discriminator.to(device)
+        # self.discriminator.eval()
+
         vloss = 0.0
         gloss = 0.0
+        # 删除对应和领域损失
+        # closs = 0.0 # Correspondence Loss
+        # dloss = 0.0 # Domain Loss
         count = 0
         nan_count = 0
         
@@ -923,6 +1138,9 @@ class Action:
 
                     vloss += loss.item()
                     gloss += loss_g.item()
+                    # 删除对应和领域损失累计
+                    # closs += loss_corr.item()
+                    # dloss += loss_domain.item()
                     count += 1
                     
                     # Display progress every 10 batches
@@ -938,121 +1156,73 @@ class Action:
         if count > 0:
             ave_vloss = float(vloss)/count
             ave_gloss = float(gloss)/count
+            # 删除对应和领域损失平均值计算
+            # ave_closs = float(closs)/count
+            # ave_dloss = float(dloss)/count
         else:
             print("Warning: All validation batches failed!")
             ave_vloss = 1e5  # Use a large value instead of inf
             ave_gloss = 1e5
+            # 删除对应和领域损失默认值
+            # ave_closs = 1e5
+            # ave_dloss = 1e5
         
         print(f"\nValidation statistics:")
         print(f"Valid batches: {count}/{len(testloader)} ({count/len(testloader)*100:.2f}%)")
-        print(f"Validation results: Loss={ave_vloss:.4f}, Feature loss={ave_gloss:.4f}")
+        print(f"Validation results: 总损失={ave_vloss:.4f}, 几何损失={ave_gloss:.4f}")
         
         if nan_count > 0:
             print(f"Evaluation: {nan_count} batches had NaN values ({nan_count/len(testloader)*100:.2f}%)")
             
-        return ave_vloss, ave_gloss
+        # 删除对应和领域损失返回
+        return ave_vloss, {'loss_g': ave_gloss}
 
     def compute_loss(self, model, data, device):
-        print("====== 开始计算损失 ======")
+        """
+        compute_loss 双损失版本 + 全局特征约束
+        使用 loss_r (特征残差损失) + loss_g (几何变换损失) + 全局特征一致性损失
+        """
+        print("====== 开始计算双损失 + 全局特征约束 ======")
+        # p0: template, p1: source
         p0, p1, igt = data
-        # 克隆张量以避免内存操作问题
-        print("将数据移动到设备: {}".format(device))
-        p0 = p0.clone().to(device) # template
-        p1 = p1.clone().to(device) # source
-        igt = igt.clone().to(device) # igt: p0 -> p1
+        p0, p1, igt = p0.to(device), p1.to(device), igt.to(device)
         
-        print("点云形状: p0={}, p1={}, igt={}".format(p0.shape, p1.shape, igt.shape))
-        
-        # Check input point clouds
-        if not torch.isfinite(p0).all() or not torch.isfinite(p1).all():
-            print("警告: 输入点云包含NaN或Inf值，尝试修复")
-            # Replace NaN and Inf with 0
-            p0 = torch.nan_to_num(p0, nan=0.0, posinf=1.0, neginf=-1.0)
-            p1 = torch.nan_to_num(p1, nan=0.0, posinf=1.0, neginf=-1.0)
-            print("修复后检查: p0 finite={}, p1 finite={}".format(
-                torch.isfinite(p0).all(), torch.isfinite(p1).all()))
-        
-        try:
-            # 确保在调用前正确克隆和数据迁移
-            print("准备调用do_forward...")
-            p0_clone = p0.clone().detach().to(device)
-            p1_clone = p1.clone().detach().to(device)
-            print("参数检查: max_iter={}, xtol={}, p0_zero_mean={}, p1_zero_mean={}".format(
-                self.max_iter, self.xtol, self.p0_zero_mean, self.p1_zero_mean))
-            
-            # 打印点云的统计信息
-            print("点云统计: p0_mean={:.4f}, p0_std={:.4f}, p1_mean={:.4f}, p1_std={:.4f}".format(
-                p0_clone.mean().item(), p0_clone.std().item(), 
-                p1_clone.mean().item(), p1_clone.std().item()))
-            
-            print("开始调用do_forward...")
-            r_start_time = time.time()
-            r = ptlk.pointlk.PointLK.do_forward(model, p0_clone, p1_clone, self.max_iter, self.xtol,
+        # 调用PointLK核心前向传播函数
+        r = ptlk.pointlk.PointLK.do_forward(model, p0, p1, self.max_iter, self.xtol,
                                              self.p0_zero_mean, self.p1_zero_mean)
-            r_time = time.time() - r_start_time
-            print("do_forward完成，耗时: {:.4f}秒".format(r_time))
-            print("r形状: {}，r统计: mean={:.4f}, std={:.4f}, min={:.4f}, max={:.4f}, 包含NaN={}".format(
-                r.shape, r.mean().item(), r.std().item(), r.min().item(), r.max().item(), torch.isnan(r).any()))
-            
-            print("获取变换矩阵est_g...")
-            est_g = model.g
-            print("est_g形状: {}，包含NaN={}".format(est_g.shape, torch.isnan(est_g).any()))
-
-            # Add numerical check
-            if not torch.isfinite(est_g).all():
-                print("警告: 变换矩阵包含非有限值")
-                print("est_g详细信息:")
-                print(est_g)
-                return torch.tensor(float('nan'), device=device), torch.tensor(float('nan'), device=device)
-            
-            print("计算loss_g...")
-            loss_g_start = time.time()
-            loss_g = ptlk.pointlk.PointLK.comp(est_g, igt)
-            print("loss_g计算完成: {:.4f}，耗时: {:.4f}秒".format(loss_g.item(), time.time() - loss_g_start))
-            
-            # Add loss value limiting
-            if loss_g > 1e5:
-                print(f"警告: Loss g 过大 ({loss_g.item()})，限制为 1e5")
-                loss_g = torch.clamp(loss_g, max=1e5)
-
-            print("计算最终损失...")
-            if self._loss_type == 0:
-                loss_r = ptlk.pointlk.PointLK.rsq(r)
-                loss = loss_r
-                print("损失类型 0: loss_r={:.4f}, 最终loss={:.4f}".format(loss_r.item(), loss.item()))
-            elif self._loss_type == 1:
-                loss_r = ptlk.pointlk.PointLK.rsq(r)
-                # Set loss scale to prevent numerical issues
-                loss = loss_r + loss_g * 0.1  # Reduce loss_g weight
-                print("损失类型 1: loss_r={:.4f}, loss_g={:.4f}, 最终loss={:.4f}".format(
-                    loss_r.item(), loss_g.item()*0.1, loss.item()))
-            elif self._loss_type == 2:
-                pr = model.prev_r
-                if pr is not None:
-                    loss_r = ptlk.pointlk.PointLK.rsq(r - pr)
-                    print("使用上一个r: pr形状={}".format(pr.shape))
-                else:
-                    loss_r = ptlk.pointlk.PointLK.rsq(r)
-                    print("没有上一个r")
-                loss = loss_r + loss_g * 0.1  # Reduce loss_g weight
-                print("损失类型 2: loss_r={:.4f}, loss_g={:.4f}, 最终loss={:.4f}".format(
-                    loss_r.item(), loss_g.item()*0.1, loss.item()))
-            else:
-                loss = loss_g
-                print("损失类型 其他: 直接使用loss_g={:.4f}".format(loss_g.item()))
-            
-            # Final check
-            if not torch.isfinite(loss):
-                print(f"警告: 最终损失有非有限值 {loss}")
-                return torch.tensor(1e5, device=device), torch.tensor(1e5, device=device)
-            
-            print("====== 损失计算完成 ======")
-            return loss, loss_g
         
-        except Exception as e:
-            print(f"损失计算错误: {e}")
-            traceback.print_exc()
-            return torch.tensor(float('nan'), device=device), torch.tensor(float('nan'), device=device)
+        # 获取最终估计的变换矩阵
+        est_g = model.g
+        
+        # 计算几何损失 (loss_g)
+        loss_g = ptlk.pointlk.PointLK.comp(est_g, igt)
+        
+        # 计算特征残差损失 (loss_r)
+        loss_r = ptlk.pointlk.PointLK.rsq(r)
+        
+        # 添加全局特征一致性损失
+        # 获取p0和变换后p1的全局特征
+        p1_transformed = ptlk.se3.transform(est_g.unsqueeze(1), p1)  # 使用估计的变换
+        
+        # 提取全局特征
+        f0_out = model.ptnet(p0)
+        f0 = f0_out[0] if isinstance(f0_out, tuple) else f0_out
+        
+        f1_out = model.ptnet(p1_transformed)
+        f1 = f1_out[0] if isinstance(f1_out, tuple) else f1_out
+        
+        # 全局特征一致性损失 (MSE)
+        loss_global_consistency = torch.nn.functional.mse_loss(f0, f1)
+        
+        # 组合损失: loss_r + loss_g + 0.1 * loss_global_consistency
+        global_consistency_weight = self.global_consistency_weight # 从args获取权重
+        loss = loss_r + loss_g + global_consistency_weight * loss_global_consistency
+        
+        print(f"loss_r: {loss_r.item():.4f}, loss_g: {loss_g.item():.4f}, loss_global_consistency: {loss_global_consistency.item():.4f}")
+        print("====== 损失计算完成 ======")
+
+        # 返回总损失和几何损失
+        return loss, loss_g
 
 
 class ShapeNet2_transform_coordinate:

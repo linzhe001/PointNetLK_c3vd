@@ -1,13 +1,13 @@
 #!/usr/bin/bash
 #$ -l tmem=32G
 #$ -l h_vmem=32G
-#$ -l h_rt=36000  # 1小时测试时间
+#$ -l h_rt=3600  # 1小时测试时间
 #$ -l gpu=true
 
 #$ -pe gpu 1
-#$ -N ljiang_test_icp_c3vd
-#$ -o /SAN/medic/MRpcr/logs/f_test_icp_c3vd_output.log
-#$ -e /SAN/medic/MRpcr/logs/f_test_icp_c3vd_error.log
+#$ -N ljiang_test_icp_modelnet
+#$ -o /SAN/medic/MRpcr/logs/f_test_icp_model_output.log
+#$ -e /SAN/medic/MRpcr/logs/f_test_icp_model_error.log
 #$ -wd /SAN/medic/MRpcr
 
 # 进入实验脚本所在目录
@@ -21,22 +21,22 @@ source /SAN/medic/MRpcr/miniconda3/etc/profile.d/conda.sh
 conda activate pointlk
 
 # 创建结果目录
-mkdir -p /SAN/medic/MRpcr/results/icp_c3vd/test_results
-mkdir -p /SAN/medic/MRpcr/results/icp_c3vd/test_results/gt
+mkdir -p /SAN/medic/MRpcr/results/icp_modelnet/test_results
+mkdir -p /SAN/medic/MRpcr/results/icp_modelnet/test_results/gt
 
 # Python命令
 PY3="nice -n 10 python"
 
 # 配置参数
-DATASET_PATH="/SAN/medic/MRpcr/C3VD_datasets"
-CATEGORY_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/experiments/sampledata/c3vd.txt"
+DATASET_PATH="/SAN/medic/MRpcr/ModelNet40"
+CATEGORY_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/experiments/sampledata/modelnet40.txt"
 PERTURBATION_DIR="/SAN/medic/MRpcr/PointNetLK_c3vd/gt"
-OUTFILE="/SAN/medic/MRpcr/results/icp_c3vd/test_results/icp_results.csv"
+OUTFILE="/SAN/medic/MRpcr/results/icp_modelnet/test_results/icp_results.csv"
 NUM_POINTS=1024             # 点云点数
 DEVICE="cpu"              # 使用CPU进行ICP
 MAX_ITER=20                 # ICP最大迭代次数
 MAX_SAMPLES=1000            # 最大测试样本数
-PAIR_MODE="one_to_one"    # 配对模式
+PAIR_MODE="one_to_one"    # 配对模式（对ModelNet不适用，但保持一致性）
 WORKERS=4                   # 数据加载线程数
 
 # 打印配置信息
@@ -53,12 +53,12 @@ echo "使用设备: ${DEVICE}"
 echo "数据加载线程: ${WORKERS}"
 echo "================================"
 
-# # 运行ICP测试
+# 第一轮测试：使用扰动文件夹
 ${PY3} test_icp.py \
   -o ${OUTFILE} \
   -i ${DATASET_PATH} \
   -c ${CATEGORY_FILE} \
-  --dataset-type c3vd \
+  --dataset-type modelnet \
   --perturbation-dir ${PERTURBATION_DIR} \
   --num-points ${NUM_POINTS} \
   --max-iter ${MAX_ITER} \
@@ -71,13 +71,13 @@ ${PY3} test_icp.py \
 # 第二轮测试：GT姿态文件
 # =============================================================================
 GT_POSES_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/gt_poses.csv"
-OUTFILE_GT="/SAN/medic/MRpcr/results/icp_c3vd/test_results/gt/icp_results_gt.csv"
+OUTFILE_GT="/SAN/medic/MRpcr/results/icp_modelnet/test_results/gt/icp_results_gt.csv"
 echo "========== 第二轮测试：GT姿态文件 =========="
 ${PY3} test_icp.py \
   -o ${OUTFILE_GT} \
   -i ${DATASET_PATH} \
   -c ${CATEGORY_FILE} \
-  --dataset-type c3vd \
+  --dataset-type modelnet \
   --perturbations ${GT_POSES_FILE} \
   --num-points ${NUM_POINTS} \
   --max-iter ${MAX_ITER} \

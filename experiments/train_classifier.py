@@ -27,8 +27,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pa
 import ptlk
 from ptlk import attention_v1
 from ptlk import mamba3d_v1  # 导入Mamba3D模块
+from ptlk import mamba3d_v2
+from ptlk import mamba3d_v3
+from ptlk import mamba3d_v4
 from ptlk import fast_point_attention  # 导入快速点注意力模块
 from ptlk import cformer  # 导入Cformer模块
+# 删除对抗模块导入
+# from ptlk.adversarial import GradReverse, DomainDiscriminator # 导入对抗模块
+import torch.nn.functional as F
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
@@ -60,8 +66,8 @@ def options(argv=None):
                         help='symmetric function (default: max)')
 
     # 添加模型选择参数
-    parser.add_argument('--model-type', default='pointnet', choices=['pointnet', 'attention', 'mamba3d', 'fast_attention', 'cformer'],
-                        help='选择模型类型: pointnet、attention、mamba3d、fast_attention或cformer (默认: pointnet)')
+    parser.add_argument('--model-type', default='pointnet', choices=['pointnet', 'attention', 'mamba3d', 'mamba3d_v2', 'fast_attention', 'cformer', 'mamba3d_v3', 'mamba3d_v4'],
+                        help='选择模型类型: pointnet、attention、mamba3d、mamba3d_v2、fast_attention、cformer、mamba3d_v3、mamba3d_v4 (默认: pointnet)')
     
     # 添加attention模型特定参数
     parser.add_argument('--num-attention-blocks', default=3, type=int,
@@ -120,6 +126,11 @@ def options(argv=None):
                         metavar='N', help='学习率预热轮次数 (默认: 5)')
     parser.add_argument('--cosine-annealing', action='store_true',
                         help='使用余弦退火学习率策略')
+
+    # 删除领域对抗训练参数
+    # parser.add_argument('--adversarial-lambda', default=0.1, type=float,
+    #                     metavar='L', help='领域对抗损失的权重 (默认: 0.1)')
+
 
     args = parser.parse_args(argv)
     return args
@@ -195,17 +206,21 @@ def run(args, trainset, testset, action):
     print(f"Training batches: {len(trainloader)}, Test batches: {len(testloader)}")
     
     # Optimizer
-    min_loss = float('inf')
+    best_val_loss = float('inf')  # 初始化最佳验证损失
     learnable_params = filter(lambda p: p.requires_grad, model.parameters())
     if args.optimizer == 'Adam':
-        optimizer = torch.optim.Adam(learnable_params, lr=0.001, weight_decay=1e-6)
+        optimizer = torch.optim.Adam(learnable_params, lr=0.001, weight_decay=1e-4) # 优化：增加权重衰减
     else:
-        optimizer = torch.optim.SGD(learnable_params, lr=0.01, momentum=0.9, weight_decay=1e-5)
+        optimizer = torch.optim.SGD(learnable_params, lr=0.01, momentum=0.9, weight_decay=1e-4) # 优化：增加权重衰减
 
     if checkpoint is not None:
-        min_loss = checkpoint['min_loss']
+        best_val_loss = checkpoint.get('min_loss', float('inf'))  # 加载最佳验证损失
         optimizer.load_state_dict(checkpoint['optimizer'])
     
+    # 初始化用于模型选择的变量
+    best_val_acc = 0.0  # 记录最佳验证准确率
+    best_val_loss = float('inf')  # 记录最佳验证损失，初始化为无穷大
+
     # 定义学习率调度函数
     def adjust_learning_rate(epoch, optimizer, base_lr, warmup_epochs=5, cosine_annealing=True, max_epochs=200):
         """
@@ -274,19 +289,24 @@ def run(args, trainset, testset, action):
         
         epoch_time = time.time() - epoch_start
         
-        is_best = val_loss < min_loss
-        min_loss = min(val_loss, min_loss)
-
+        is_best = False
+        # 基于最低验证损失的模型保存策略
+        if val_loss < best_val_loss:
+            is_best = True
+            best_val_loss = val_loss
+            best_val_acc = val_info
+            print(f"[Save] Found better model with validation loss: {val_loss:.4f} (accuracy: {val_info:.4f})")
+        
         # 获取当前学习率
         current_lr = optimizer.param_groups[0]['lr']
 
         print(f"[Time] Epoch {epoch+1}: {epoch_time:.2f} sec | Loss: {running_loss:.4f} | Validation: {val_loss:.4f} | Accuracy: {running_info:.2f} | LR: {current_lr:.8f}")
-        print(f"[Info] Best epoch: {best_epoch}")
+        print(f"[Info] Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
         
         LOGGER.info('epoch, %04d, %f, %f, %f, %f, %04d, %f', epoch + 1, running_loss, val_loss, running_info, val_info, best_epoch, current_lr)
         snap = {'epoch': epoch + 1,
                 'model': model.state_dict(),
-                'min_loss': min_loss,
+                'min_loss': best_val_loss,  # 使用最佳验证损失
                 'best_epoch': best_epoch,  # 保存最佳epoch信息
                 'optimizer' : optimizer.state_dict(),}
         
@@ -335,8 +355,12 @@ class Action:
         self.num_proxy_points = getattr(args, 'num_proxy_points', 8)
         self.num_blocks = getattr(args, 'num_blocks', 2)
         
+        # 删除领域对抗参数
+        # self.adversarial_lambda = args.adversarial_lambda
+        # self.discriminator = None
+        
         self.sym_fn = None
-        if args.model_type == 'attention':
+        if self.model_type == 'attention':
             # 为attention模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = attention_v1.symfn_max
@@ -344,7 +368,7 @@ class Action:
                 self.sym_fn = attention_v1.symfn_avg
             else:
                 self.sym_fn = attention_v1.symfn_attention_pool  # attention特有的聚合
-        elif args.model_type == 'mamba3d':
+        elif self.model_type == 'mamba3d':
             # 为Mamba3D模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = mamba3d_v1.symfn_max
@@ -354,7 +378,37 @@ class Action:
                 self.sym_fn = mamba3d_v1.symfn_selective
             else:
                 self.sym_fn = mamba3d_v1.symfn_max  # 默认使用最大池化
-        elif args.model_type == 'fast_attention':
+        elif self.model_type == 'mamba3d_v2':
+            # 为Mamba3D_v2模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = mamba3d_v2.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = mamba3d_v2.symfn_avg
+            elif args.symfn == 'selective':
+                self.sym_fn = mamba3d_v2.symfn_selective
+            else:
+                self.sym_fn = mamba3d_v2.symfn_max  # 默认使用最大池化
+        elif self.model_type == 'mamba3d_v3':
+            # 为Mamba3D_v3模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = mamba3d_v3.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = mamba3d_v3.symfn_avg
+            elif args.symfn == 'selective':
+                self.sym_fn = mamba3d_v3.symfn_selective
+            else:
+                self.sym_fn = mamba3d_v3.symfn_max
+        elif self.model_type == 'mamba3d_v4':
+            # 为Mamba3D_v4模型设置聚合函数
+            if args.symfn == 'max':
+                self.sym_fn = mamba3d_v4.symfn_max
+            elif args.symfn == 'avg':
+                self.sym_fn = mamba3d_v4.symfn_avg
+            elif args.symfn == 'selective':
+                self.sym_fn = mamba3d_v4.symfn_selective
+            else:
+                self.sym_fn = mamba3d_v4.symfn_max
+        elif self.model_type == 'fast_attention':
             # 为快速点注意力模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = fast_point_attention.symfn_max
@@ -364,7 +418,7 @@ class Action:
                 self.sym_fn = fast_point_attention.symfn_fast_attention_pool  # 快速注意力特有的聚合
             else:
                 self.sym_fn = fast_point_attention.symfn_max  # 默认使用最大池化
-        elif args.model_type == 'cformer':
+        elif self.model_type == 'cformer':
             # 为Cformer模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = cformer.symfn_max
@@ -382,6 +436,9 @@ class Action:
                 self.sym_fn = ptlk.pointnet.symfn_avg
 
     def create_model(self):
+        # 删除判别器初始化
+        # self.discriminator = DomainDiscriminator(input_dim=self.dim_k)
+
         if self.model_type == 'attention':
             # 创建attention模型
             feat = attention_v1.AttentionNet_features(
@@ -403,6 +460,39 @@ class Action:
                 expand=self.expand
             )
             return mamba3d_v1.Mamba3D_classifier(self.num_classes, feat, self.dim_k)
+        elif self.model_type == 'mamba3d_v2':
+            # 创建Mamba3D_v2 (高性能版本)模型
+            feat = mamba3d_v2.Mamba3D_features(
+                dim_k=self.dim_k,
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            return mamba3d_v2.Mamba3D_classifier(self.num_classes, feat, self.dim_k)
+        elif self.model_type == 'mamba3d_v3':
+            # 创建Mamba3D_v3 (SE-Net)模型
+            feat = mamba3d_v3.Mamba3D_features(
+                dim_k=self.dim_k,
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            return mamba3d_v3.Mamba3D_classifier(self.num_classes, feat, self.dim_k)
+        elif self.model_type == 'mamba3d_v4':
+            # 创建Mamba3D_v4 (CBAM)模型
+            feat = mamba3d_v4.Mamba3D_features(
+                dim_k=self.dim_k,
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            return mamba3d_v4.Mamba3D_classifier(self.num_classes, feat, self.dim_k)
         elif self.model_type == 'fast_attention':
             # 创建快速点注意力模型
             feat = fast_point_attention.FastPointAttention_features(
@@ -429,6 +519,10 @@ class Action:
 
     def train_1(self, model, trainloader, optimizer, device):
         model.train()
+        # 删除判别器相关代码
+        # self.discriminator.to(device) # 确保判别器在正确的设备上
+        # self.discriminator.train()
+
         vloss = 0.0
         pred  = 0.0
         count = 0  # 用于计算准确率的样本数
@@ -532,6 +626,10 @@ class Action:
 
     def eval_1(self, model, testloader, device):
         model.eval()
+        # 删除判别器相关代码
+        # self.discriminator.to(device)
+        # self.discriminator.eval()
+
         vloss = 0.0
         pred = 0.0
         count = 0  # 用于计算准确率的样本数
@@ -624,7 +722,12 @@ class Action:
         return ave_loss, accuracy
 
     def compute_loss(self, model, data, device):
-        points, target = data
+        # 修改数据解包：删除domain_labels
+        if len(data) == 3:
+            points, target, domain_labels = data
+        else:
+            points, target = data
+            
         points = points.to(device)
         target = target.to(device)
         
@@ -636,8 +739,22 @@ class Action:
             points[torch.isnan(points)] = 0.0
             points[torch.isinf(points)] = 0.0
         
+        # 只使用分类损失
         output = model(points)
         loss = model.loss(output, target)
+
+        # 删除领域对抗损失计算
+        # 领域对抗损失
+        # 注意：分类器的 model.features() 现在返回 (全局特征, 局部特征)
+        # global_feat, _ = model.features(points)
+        
+        # 通过GRL层和判别器
+        # domain_logits = self.discriminator(GradReverse.apply(global_feat, self.adversarial_lambda))
+        # loss_domain = F.cross_entropy(domain_logits, domain_labels, reduction='sum') # 修复：将损失计算方式从'mean'改为'sum'以匹配尺度
+
+        # 组合损失
+        # loss = loss_cls + loss_domain * self.adversarial_lambda
+
         return target, output, loss
 
 
@@ -705,6 +822,8 @@ class C3VDDatasetForClassification(torch.utils.data.Dataset):
         # 收集点云文件和它们的类别
         self.points_files = []
         self.point_classes = []
+        # 删除领域标签
+        # self.domain_labels = [] # 新增：领域标签 (0 for MRI, 1 for Video)
         self.scene_to_prefix = {}  # 映射场景名到类别前缀
         self.pair_scenes = []  # 记录每个点云所属的场景，用于场景分割
         
@@ -718,7 +837,7 @@ class C3VDDatasetForClassification(torch.utils.data.Dataset):
                 if prefix in self.c_to_idx:
                     self.scene_to_prefix[scene_name] = prefix
         
-        # 处理源点云
+        # 处理源点云 (视频)
         for scene in self.scene_to_prefix:
             source_path = os.path.join(self.source_root, scene)
             if os.path.isdir(source_path):
@@ -728,9 +847,11 @@ class C3VDDatasetForClassification(torch.utils.data.Dataset):
                 for ply_file in source_files:
                     self.points_files.append(ply_file)
                     self.point_classes.append(self.c_to_idx[prefix])
+                    # 删除领域标签
+                    # self.domain_labels.append(1) # 视频点云，领域标签为1
                     self.pair_scenes.append(scene)  # 记录点云所属场景
         
-        # 处理目标点云
+        # 处理目标点云 (MRI)
         for scene in self.scene_to_prefix:
             target_path = os.path.join(self.target_root, scene)
             if os.path.isdir(target_path):
@@ -741,6 +862,8 @@ class C3VDDatasetForClassification(torch.utils.data.Dataset):
                 for ply_file in target_files:
                     self.points_files.append(ply_file)
                     self.point_classes.append(self.c_to_idx[prefix])
+                    # 删除领域标签
+                    # self.domain_labels.append(0) # MRI点云，领域标签为0
                     self.pair_scenes.append(scene)  # 记录点云所属场景
         
         # 打印每个类别的样本数量
@@ -795,6 +918,8 @@ class C3VDDatasetForClassification(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         ply_file = self.points_files[idx]
         class_idx = self.point_classes[idx]
+        # 删除领域标签
+        # domain_label = self.domain_labels[idx]
         
         # 读取点云
         points = plyread(ply_file)
@@ -803,6 +928,7 @@ class C3VDDatasetForClassification(torch.utils.data.Dataset):
         if self.transform:
             points = self.transform(points)
         
+        # 返回点云和类别索引，不返回领域标签
         return points, class_idx
 
     def get_scene_indices(self, scene_names):
@@ -844,8 +970,12 @@ class C3VDClassifierDataset(torch.utils.data.Dataset):
         return len(self.dataset)
     
     def __getitem__(self, idx):
-        # 获取原始点云和类别
-        points, class_idx = self.dataset[idx]
+        # 获取原始点云和类别，不获取领域标签
+        data = self.dataset[idx]
+        if len(data) == 3:
+            points, class_idx, domain_label = data
+        else:
+            points, class_idx = data
         
         # 检查点云有效性
         if not torch.isfinite(points).all():
@@ -867,6 +997,7 @@ class C3VDClassifierDataset(torch.utils.data.Dataset):
         if torch.rand(1).item() > 0.5:  # 50%几率添加抖动
             points = self.jitter(points)
         
+        # 只返回点云和类别索引
         return points, class_idx
 
 def get_datasets(args):

@@ -1,8 +1,8 @@
-""" 3DMamba-based Point Cloud Feature Extractor v2.0
+""" 3DMamba-based Point Cloud Feature Extractor v3.0 (SE-Net)
     专为点云配准和分类任务设计的基于Mamba模型的特征提取器
     
-    使用 mamba-ssm 库的高性能CUDA算子替换了自定义的S6Layer实现，
-    显著提升了计算效率。
+    使用 mamba-ssm 库的高性能CUDA算子，并集成了 SE-Net (Squeeze-and-Excitation)
+    来增强特征通道的表达能力。
 
     设计考虑:
     1. 点云的无序性 - 通过位置编码和空间感知SSM处理
@@ -10,11 +10,10 @@
     3. 与PointNet_features兼容的接口
     4. Mamba模型的线性复杂度和长序列处理能力
     
-    v2.0 更新:
-    - 引入 mamba-ssm 库替换自定义 S6Layer
-    - 移除 S6Layer, _efficient_scan, _process_chunk 等底层实现
-    - 简化 Mamba3DBlock，直接调用高性能 Mamba 层
-    - 提升训练和推理速度
+    v3.0 更新:
+    - 基于 v2.0，在MLP层后添加 SE_Layer，实现通道注意力机制
+    - 调整 Mamba3D_features 的输出以同时返回全局和局部特征，确保与训练脚本兼容
+    - 调整 Mamba3D_classifier 以适应特征提取器的新输出格式
 """
 
 import torch
@@ -35,8 +34,43 @@ class Flatten(torch.nn.Module):
         return flatten(x)
 
 
+class SE_Layer(nn.Module):
+    """
+    Squeeze-and-Excitation Block for 1D features (point clouds).
+    Applies channel-wise attention.
+    """
+    def __init__(self, channel, reduction=16):
+        """
+        Args:
+            channel (int): Number of input channels.
+            reduction (int): Reduction factor for the bottleneck layer.
+        """
+        super(SE_Layer, self).__init__()
+        # Squeeze 操作: 全局平均池化
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        # Excitation 操作: 两层MLP组成的瓶颈结构
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: input tensor [Batch, Channel, N_points]
+        Returns:
+            output: re-weighted tensor [Batch, Channel, N_points]
+        """
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)  # [B, C, N] -> [B, C, 1] -> [B, C]
+        y = self.fc(y).view(b, c, 1)     # [B, C] -> [B, C, 1]
+        return x * y.expand_as(x)        # 将权重广播并应用到原始特征图
+
+
 def mlp_layers(nch_input, nch_layers, b_shared=True, bn_momentum=0.1, dropout=0.0):
-    """ 创建多层感知机层
+    """ 创建多层感知机层，并集成SE-Net
         [B, Cin, N] -> [B, Cout, N] 或 [B, Cin] -> [B, Cout]
     """
     layers = []
@@ -49,6 +83,8 @@ def mlp_layers(nch_input, nch_layers, b_shared=True, bn_momentum=0.1, dropout=0.
         layers.append(weights)
         layers.append(torch.nn.BatchNorm1d(outp, momentum=bn_momentum))
         layers.append(torch.nn.ReLU())
+        if b_shared: # 只对共享权重的卷积层添加SE模块
+            layers.append(SE_Layer(outp))
         if b_shared == False and dropout > 0.0:
             layers.append(torch.nn.Dropout(dropout))
         last = outp
@@ -119,17 +155,15 @@ def symfn_avg(x):
 
 def symfn_selective(x):
     """基于选择性聚合的函数 [B, N, K] -> [B, K]"""
-    # 使用softmax得到每个点的权重
-    weights = torch.softmax(torch.sum(x, dim=-1), dim=-1)  # [B, N]
-    weights = weights.unsqueeze(-1)  # [B, N, 1]
+    weights = torch.softmax(torch.sum(x, dim=-1), dim=-1)
+    weights = weights.unsqueeze(-1)
     
-    # 加权求和
-    aggregated = torch.sum(x * weights, dim=1)  # [B, K]
+    aggregated = torch.sum(x * weights, dim=1)
     return aggregated
 
 
 class Mamba3D_features(torch.nn.Module):
-    """基于3DMamba的点云特征提取器 - v2.0 高性能版本
+    """基于3DMamba的点云特征提取器 - v3.0 (SE-Net)
     
     输入: [B, N, 3] 点云
     输出: ([B, K], [B, N, K]) 全局特征向量和逐点特征
@@ -138,19 +172,14 @@ class Mamba3D_features(torch.nn.Module):
                  d_state=16, expand=2):
         super().__init__()
         
-        # 特征维度设置
         self.d_model = max(64, int(128 / scale))
         self.dim_k = int(dim_k / scale)
         self.num_mamba_blocks = num_mamba_blocks
         
-        # 输入嵌入层：将3D坐标映射到高维特征空间
         self.input_projection = nn.Linear(3, self.d_model)
         
-        # 3D位置编码
         self.pos_encoding = nn.Parameter(torch.randn(1, 2048, self.d_model) * 0.02)
         
-        # [改动] 创建高性能版本的 Mamba3DBlock
-        # 参数可以直接传递，不再需要手动缩减
         self.mamba_blocks = nn.ModuleList([
             Mamba3DBlock(
                 d_model=self.d_model, 
@@ -160,17 +189,14 @@ class Mamba3D_features(torch.nn.Module):
             for _ in range(self.num_mamba_blocks)
         ])
         
-        # 特征变换层：从mamba维度映射到最终特征维度
         self.feature_transform = MLPNet(
             self.d_model, 
             [int(256/scale), self.dim_k], 
-            b_shared=True  # 使用Conv1d层以支持[B, d_model, N]格式输入
+            b_shared=True
         )
         
-        # 聚合函数
         self.sy = sym_fn
         
-        # 保持与PointNet_features兼容的属性
         self.t_out_t2 = None
         self.t_out_h1 = None
 
@@ -186,14 +212,11 @@ class Mamba3D_features(torch.nn.Module):
         """
         batch_size, num_points, _ = points.size()
         
-        # 输入投影：3D坐标 -> 高维特征
-        x = self.input_projection(points)  # [B, N, d_model]
+        x = self.input_projection(points)
         
-        # 添加位置编码
         if num_points <= self.pos_encoding.size(1):
             pos_encoding = self.pos_encoding[:, :num_points, :]
         else:
-            # 对于更长的序列，使用线性插值
             pos_encoding = F.interpolate(
                 self.pos_encoding.transpose(1, 2), 
                 size=num_points, 
@@ -203,95 +226,55 @@ class Mamba3D_features(torch.nn.Module):
         
         x = x + pos_encoding
         
-        # 保存中间特征（兼容性）
-        self.t_out_h1 = x.transpose(1, 2)  # [B, d_model, N] 格式用于兼容
+        self.t_out_h1 = x.transpose(1, 2)
         
-        # 通过多层Mamba块
         for mamba_block in self.mamba_blocks:
-            x = mamba_block(x)  # [B, N, d_model]
+            x = mamba_block(x)
         
-        # 特征变换
-        # 转换为 [B, d_model, N] 格式用于Conv1d处理
-        x = x.transpose(1, 2)  # [B, d_model, N]
-        x = self.feature_transform(x)  # [B, dim_k, N]
+        x = x.transpose(1, 2)
+        x = self.feature_transform(x)
         
-        # 转回 [B, N, dim_k] 格式进行聚合
-        x = x.transpose(1, 2)  # [B, N, dim_k]
+        x = x.transpose(1, 2)
+        point_features = x
         
-        # 全局聚合
         if self.sy == symfn_max:
-            global_features = symfn_max(x)  # [B, dim_k]
+            global_features = symfn_max(point_features)
         elif self.sy == symfn_avg:
-            global_features = symfn_avg(x)  # [B, dim_k]
+            global_features = symfn_avg(point_features)
         elif self.sy == symfn_selective:
-            global_features = symfn_selective(x)  # [B, dim_k]
+            global_features = symfn_selective(point_features)
         else:
-            # 默认使用最大池化
-            global_features = symfn_max(x)  # [B, dim_k]
+            global_features = symfn_max(point_features)
         
-        return global_features, x
+        return global_features, point_features
 
 
 class Mamba3D_classifier(torch.nn.Module):
     """基于3DMamba的点云分类器
-    
-    类似于PointNet_classifier，使用Mamba3D_features作为特征提取器
     """
     def __init__(self, num_c, mambafeat, dim_k):
-        """
-        Args:
-            num_c: 分类数量
-            mambafeat: Mamba3D_features实例
-            dim_k: 特征维度
-        """
         super().__init__()
         self.features = mambafeat
         
-        # 分类头：特征向量 -> 分类结果
         list_layers = mlp_layers(dim_k, [512, 256], b_shared=False, bn_momentum=0.1, dropout=0.0)
         list_layers.append(torch.nn.Linear(256, num_c))
         self.classifier = torch.nn.Sequential(*list_layers)
 
     def forward(self, points):
-        """
-        前向传播
-        
-        Args:
-            points: [B, N, 3] 输入点云
-            
-        Returns:
-            out: [B, num_c] 分类输出
-        """
         global_feat, _ = self.features(points)
         out = self.classifier(global_feat)
         return out
 
     def loss(self, out, target, w=0.001):
-        """
-        计算损失函数
-        
-        Args:
-            out: [B, num_c] 分类输出
-            target: [B] 真实标签
-            w: 正则化权重
-            
-        Returns:
-            loss: 总损失
-        """
-        # 分类损失
         loss_c = torch.nn.functional.nll_loss(
             torch.nn.functional.log_softmax(out, dim=1), target, size_average=False)
 
-        # 注意：对于mamba模型，我们目前不添加变换矩阵正则化
-        # 因为mamba机制的结构与PointNet不同，没有对应的t_out_t2
-        # 如果需要，可以添加其他形式的正则化
         t2 = self.features.t_out_t2
         if (t2 is None) or (w == 0):
             return loss_c
 
-        # 如果存在变换矩阵，添加正则化项
         batch = t2.size(0)
-        K = t2.size(1)  # [B, K, K]
+        K = t2.size(1)
         I = torch.eye(K).repeat(batch, 1, 1).to(t2)
         A = t2.bmm(t2.transpose(1, 2))
         loss_m = torch.nn.functional.mse_loss(A, I, size_average=False)

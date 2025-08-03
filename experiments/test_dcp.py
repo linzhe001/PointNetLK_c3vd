@@ -395,14 +395,19 @@ def get_datasets(args):
             # which is what from_euler('zyx', [z,y,x]) produces.
             # To get the angles for this from a matrix, we use as_euler('zyx').
             # This returns angles for Z, Y, X axes respectively.
-            eulers_zyx = sciR.from_matrix(R.numpy()).as_euler('zyx')
+            eulers_zyx_rad = sciR.from_matrix(R.numpy()).as_euler('zyx')
             
+            # 数据加载器期望以度为单位的角度，但 as_euler 返回弧度。需要转换。
+            # The data loader expects angles in degrees, but as_euler returns radians. Conversion is needed.
+            eulers_zyx_deg = numpy.rad2deg(eulers_zyx_rad)
+
             # The data loader expects the perturbation columns to be [angle_x, angle_y, angle_z].
             # So we need to reverse the columns from [z, y, x] to [x, y, z].
-            eulers_xyz = eulers_zyx[:, ::-1]
+            eulers_xyz_deg = eulers_zyx_deg[:, ::-1]
             
             # Combine to create the new perturbation array
-            perturbations = numpy.concatenate([eulers_xyz, t.numpy()], axis=1)
+            perturbations = numpy.concatenate([eulers_xyz_deg, t.numpy()], axis=1)
+            print("INFO: Converted perturbations to Euler angles (degrees) and translation.")
 
         # Directly use the modified ModelNet40 loader
         testset = ModelNet40(

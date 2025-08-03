@@ -366,19 +366,20 @@ class Mamba3D_features(torch.nn.Module):
         
         # 转回 [B, N, dim_k] 格式进行聚合
         x = x.transpose(1, 2)  # [B, N, dim_k]
+        point_features = x
         
         # 全局聚合
         if self.sy == symfn_max:
-            global_features = symfn_max(x)  # [B, dim_k]
+            global_features = symfn_max(point_features)  # [B, dim_k]
         elif self.sy == symfn_avg:
-            global_features = symfn_avg(x)  # [B, dim_k]
+            global_features = symfn_avg(point_features)  # [B, dim_k]
         elif self.sy == symfn_selective:
-            global_features = symfn_selective(x)  # [B, dim_k]
+            global_features = symfn_selective(point_features)  # [B, dim_k]
         else:
             # 默认使用最大池化
-            global_features = symfn_max(x)  # [B, dim_k]
+            global_features = symfn_max(point_features)  # [B, dim_k]
         
-        return global_features
+        return global_features, point_features
 
 
 class Mamba3D_classifier(torch.nn.Module):
@@ -411,8 +412,8 @@ class Mamba3D_classifier(torch.nn.Module):
         Returns:
             out: [B, num_c] 分类输出
         """
-        feat = self.features(points)  # [B, dim_k]
-        out = self.classifier(feat)   # [B, num_c]
+        global_feat, _ = self.features(points)  # [B, dim_k], [B, N, K]
+        out = self.classifier(global_feat)   # [B, num_c]
         return out
 
     def loss(self, out, target, w=0.001):

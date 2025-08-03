@@ -73,7 +73,7 @@ VISUALIZE_SAMPLES=3
 
 # 模型路径（直接指定权重文件）
 POINTNET_MODEL_PREFIX=""
-POINTNET_MODEL="/SAN/medic/MRpcr/results/c3vd_augmented/c3vd_pointlk_all_0407_model_best.pth"
+POINTNET_MODEL="/SAN/medic/MRpcr/PointNetLK_Revisited_old/logs/c3vd_0417/pointnetlk_model_best.pth"
 
 # 检查指定的PointNet配准模型文件
 echo "🔍 检查指定的PointNet配准模型..."

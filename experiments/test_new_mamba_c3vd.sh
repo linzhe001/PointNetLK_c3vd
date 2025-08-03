@@ -1,13 +1,13 @@
 #!/usr/bin/bash
 #$ -l tmem=32G
-#$ -l h_vmem=32G            
+#$ -l h_vmem=32G
 #$ -l h_rt=36000  # 1小时测试时间
 #$ -l gpu=true
 
 #$ -pe gpu 1
-#$ -N ljiang_test_mamba3d_c3vd
-#$ -o /SAN/medic/MRpcr/logs/f_test_mamba3d_c3vd_output.log
-#$ -e /SAN/medic/MRpcr/logs/f_test_mamba3d_c3vd_error.log
+#$ -N ljiang_test_new_mamba_c3vd
+#$ -o /SAN/medic/MRpcr/logs/f_test_new_mamba_c3vd_output.log
+#$ -e /SAN/medic/MRpcr/logs/f_test_new_mamba_c3vd_error.log
 #$ -wd /SAN/medic/MRpcr
 
 cd /SAN/medic/MRpcr/PointNetLK_c3vd/experiments
@@ -20,8 +20,8 @@ source /SAN/medic/MRpcr/miniconda3/etc/profile.d/conda.sh
 conda activate pointlk
 
 # 创建结果和日志目录
-mkdir -p /SAN/medic/MRpcr/results/mamba3d_c3vd/test_results
-mkdir -p /SAN/medic/MRpcr/results/mamba3d_c3vd/test_results/gt
+mkdir -p /SAN/medic/MRpcr/results/new_mamba_c3vd/test_results
+mkdir -p /SAN/medic/MRpcr/results/new_mamba_c3vd/test_results/gt
 
 # Python命令
 PY3="nice -n 10 python"
@@ -34,7 +34,7 @@ DEVICE="cuda:0"
 DATE_TAG=$(date +"%m%d")
 
 # 体素化配置参数（与训练保持一致）
-USE_VOXELIZATION=false            # 是否启用体素化（true/false）
+USE_VOXELIZATION=false           # 是否启用体素化（true/false），与new_mamba训练脚本保持一致
 VOXEL_SIZE=4                 # 体素大小 (适合医学点云)
 VOXEL_GRID_SIZE=32              # 体素网格尺寸
 MAX_VOXEL_POINTS=100            # 每个体素最大点数
@@ -55,8 +55,8 @@ NUM_MAMBA_BLOCKS=1            # Mamba块数量
 D_STATE=8                     # 状态空间维度
 EXPAND=2                      # 扩展因子
 SYMFN="max"                   # 聚合函数：max, avg, 或 selective
-MAX_ITER=20                   # LK最大迭代次数
-DELTA=1.0e-4                  # LK步长
+MAX_ITER=10                   # LK最大迭代次数（与训练保持一致）
+DELTA=1.0e-4                  # LK步长（与训练保持一致）
 
 # C3VD配对模式设置（与训练保持一致）
 PAIR_MODE="one_to_one"  # 使用点对点配对模式
@@ -75,23 +75,23 @@ VISUALIZE_PERT="" # 如需可视化，设置为 "--visualize-pert pert_010.csv p
 VISUALIZE_SAMPLES=3
 
 # 模型路径（自动查找最新）
-MODEL_DIR="/SAN/medic/MRpcr/results/mamba3d_c3vd"
-MAMBA3D_MODEL_PREFIX="${MODEL_DIR}/mamba3d_pointlk_${DATE_TAG}"
+MODEL_DIR="/SAN/medic/MRpcr/results/new_mamba_c3vd"
+MAMBA3D_MODEL_PREFIX="${MODEL_DIR}/new_mamba_pointlk_${DATE_TAG}"
 MAMBA3D_MODEL="${MAMBA3D_MODEL_PREFIX}_model_best.pth"
 
 if [ ! -f "${MAMBA3D_MODEL}" ]; then
-    echo "⚠️ 未找到今日Mamba3D模型: ${MAMBA3D_MODEL}"
-    # 修改查找逻辑以匹配文件名 (mamba3d_pointlk_... 或 mamba3d_pointlk_resume_...)
-    LATEST_MODEL=$(find ${MODEL_DIR} -name "mamba3d_pointlk_*_model_best.pth" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -f2- -d' ')
+    echo "⚠️ 未找到今日新Mamba3D模型: ${MAMBA3D_MODEL}"
+    # 修改查找逻辑以匹配文件名 (new_mamba_pointlk_... 或 new_mamba_pointlk_resume_...)
+    LATEST_MODEL=$(find ${MODEL_DIR} -name "new_mamba_pointlk_*_model_best.pth" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -f2- -d' ')
     if [ -n "${LATEST_MODEL}" ] && [ -f "${LATEST_MODEL}" ]; then
         MAMBA3D_MODEL="${LATEST_MODEL}"
-        echo "✅ 找到最新Mamba3D模型: ${MAMBA3D_MODEL}"
+        echo "✅ 找到最新新Mamba3D模型: ${MAMBA3D_MODEL}"
     else
-        echo "❌ 错误: 未找到任何Mamba3D模型文件!"
+        echo "❌ 错误: 未找到任何新Mamba3D模型文件!"
         exit 1
     fi
 else
-    echo "✅ 使用今日Mamba3D模型: ${MAMBA3D_MODEL}"
+    echo "✅ 使用今日新Mamba3D模型: ${MAMBA3D_MODEL}"
 fi
 
 # 提取模型前缀用于日志记录
@@ -100,11 +100,11 @@ MAMBA3D_MODEL_PREFIX=$(basename "${MAMBA3D_MODEL}" | sed 's/_model_best\.pth$//'
 
 # 检查指定的模型文件是否存在
 if [ ! -f "${MAMBA3D_MODEL}" ]; then
-    echo "❌ 错误: 指定的Mamba3D模型文件不存在: ${MAMBA3D_MODEL}"
+    echo "❌ 错误: 指定的新Mamba3D模型文件不存在: ${MAMBA3D_MODEL}"
     echo "请确保模型文件路径正确"
     exit 1
 else
-    echo "✅ 使用指定的Mamba3D模型: ${MAMBA3D_MODEL}"
+    echo "✅ 使用指定的新Mamba3D模型: ${MAMBA3D_MODEL}"
     MODEL_SIZE=$(du -h "${MAMBA3D_MODEL}" | cut -f1)
     echo "📊 模型文件大小: ${MODEL_SIZE}"
 fi
@@ -114,12 +114,12 @@ PERTURBATION_DIR="/SAN/medic/MRpcr/PointNetLK_c3vd/gt"
 GT_POSES_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/gt_poses.csv"
 
 # 测试结果输出目录
-TEST_RESULTS_DIR="/SAN/medic/MRpcr/results/mamba3d_c3vd/test_results"
+TEST_RESULTS_DIR="/SAN/medic/MRpcr/results/new_mamba_c3vd/test_results"
 TEST_LOG="${TEST_RESULTS_DIR}/test_log_${DATE_TAG}.log"
 
 # 打印配置信息
-echo "========== Mamba3D配准模型测试配置 =========="
-echo "🧠 模型类型: Mamba3D配准模型"
+echo "========== 新Mamba3D配准模型测试配置 =========="
+echo "🧠 模型类型: 新Mamba3D配准模型"
 echo "📂 数据集路径: ${DATASET_PATH}"
 echo "📄 类别文件: ${CATEGORY_FILE}"
 echo "🔗 配对模式: ${PAIR_MODE}"
@@ -225,7 +225,7 @@ else
 fi
 
 echo ""
-echo "========== 开始Mamba3D配准模型测试 =========="
+echo "========== 开始新Mamba3D配准模型测试 =========="
 echo "🚀 即将开始两轮测试..."
 echo "⏱️  预计测试时间: ~60-120分钟（依据扰动文件数量和样本数量）"
 if [ "${USE_VOXELIZATION}" = "true" ]; then
@@ -399,7 +399,7 @@ echo "📊 最终测试结果汇总:"
 
 # 统计角度目录（第一轮测试被注释掉，角度目录数为0）
 ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" 2>/dev/null | wc -l)
-echo "   - 角度测试目录数: ${ANGLE_DIRS}（第一轮测试已注释掉）"
+echo "   - 角度测试目录数: ${ANGLE_DIRS}"
 
 # 统计GT目录结果
 GT_RESULT_FILES=$(find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f 2>/dev/null | wc -l)
@@ -412,14 +412,14 @@ echo "   - 总结果文件数量: ${TOTAL_RESULT_FILES}"
 echo ""
 echo "📂 结果目录结构:"
 echo "   ${TEST_RESULTS_DIR}/"
-echo "   ├── angle_*/ (第一轮：角度扰动测试 - 已注释掉)"
+echo "   ├── angle_*/ (第一轮：角度扰动测试)"
 echo "   ├── gt/       (第二轮：GT姿态测试)"
-echo "   ├── test_log_${DATE_TAG}.log (主测试日志 - 已注释掉)"
+echo "   ├── test_log_${DATE_TAG}.log (主测试日志)"
 echo "   └── gt/test_log_gt_${DATE_TAG}.log (GT测试日志)"
 
 # 保存测试配置信息
-CONFIG_FILE="${TEST_RESULTS_DIR}/mamba3d_test_${DATE_TAG}_config.txt"
-echo "🧠 Mamba3D配准模型双轮测试配置" > ${CONFIG_FILE}
+CONFIG_FILE="${TEST_RESULTS_DIR}/new_mamba_test_${DATE_TAG}_config.txt"
+echo "🧠 新Mamba3D配准模型双轮测试配置" > ${CONFIG_FILE}
 echo "=====================================" >> ${CONFIG_FILE}
 echo "测试完成时间: $(date)" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
@@ -428,7 +428,7 @@ echo "第一轮: 角度扰动文件测试（gt 文件夹中的 pert_*.csv）" >>
 echo "第二轮: GT姿态文件测试（gt_poses.csv）" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
 echo "🔧 模型配置:" >> ${CONFIG_FILE}
-echo "模型类型: Mamba3D配准模型" >> ${CONFIG_FILE}
+echo "模型类型: 新Mamba3D配准模型" >> ${CONFIG_FILE}
 echo "特征维度: ${DIM_K}" >> ${CONFIG_FILE}
 echo "Mamba块数量: ${NUM_MAMBA_BLOCKS}" >> ${CONFIG_FILE}
 echo "状态空间维度: ${D_STATE}" >> ${CONFIG_FILE}
@@ -482,10 +482,12 @@ echo "📋 第一轮（角度）日志: ${TEST_LOG}"
 echo "📋 第二轮（GT）日志: ${TEST_LOG_ROUND2}"
 if [ "${USE_VOXELIZATION}" = "true" ]; then
     echo "🔧 使用了体素化预处理技术"
+else
+    echo "🔧 未使用体素化"
 fi
 echo "⏰ 完成时间: $(date)"
 
 echo ""
-echo "🎉🎉🎉 Mamba3D配准模型双轮测试全部完成! 🎉🎉🎉" 
-echo "📊 第一轮：角度扰动测试（存储在angle_*目录中）- 已注释掉"
+echo "🎉🎉🎉 新Mamba3D配准模型双轮测试全部完成! 🎉🎉🎉" 
+echo "📊 第一轮：角度扰动测试（存储在angle_*目录中）"
 echo "📊 第二轮：GT姿态测试（存储在gt目录中）" 

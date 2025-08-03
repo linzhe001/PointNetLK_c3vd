@@ -5,23 +5,24 @@
 #$ -l gpu=true
 
 #$ -pe gpu 1
-#$ -N ljiang_test_mamba3d_c3vd
-#$ -o /SAN/medic/MRpcr/logs/f_test_mamba3d_c3vd_output.log
-#$ -e /SAN/medic/MRpcr/logs/f_test_mamba3d_c3vd_error.log
+#$ -N ljiang_test_mamba_v2_c3vd_loss2
+#$ -o /SAN/medic/MRpcr/logs/test_mamba_v2_c3vd_loss2_output.log
+#$ -e /SAN/medic/MRpcr/logs/test_mamba_v2_c3vd_loss2_error.log
 #$ -wd /SAN/medic/MRpcr
 
 cd /SAN/medic/MRpcr/PointNetLK_c3vd/experiments
 # 设置工作目录
 echo "当前工作目录: $(pwd)"
 
-# 激活Conda环境
+# 激活Conda环境 - 修改为与训练脚本一致的环境
 echo "激活Conda环境..."
-source /SAN/medic/MRpcr/miniconda3/etc/profile.d/conda.sh
-conda activate pointlk
+source /SAN/medic/CARES/mobarak/venvs/anaconda3/etc/profile.d/conda.sh
+conda activate mamba
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # 创建结果和日志目录
-mkdir -p /SAN/medic/MRpcr/results/mamba3d_c3vd/test_results
-mkdir -p /SAN/medic/MRpcr/results/mamba3d_c3vd/test_results/gt
+mkdir -p /SAN/medic/MRpcr/results/mamba_v2_c3vd/test_results_2
+mkdir -p /SAN/medic/MRpcr/results/mamba_v2_c3vd/test_results_2/gt
 
 # Python命令
 PY3="nice -n 10 python"
@@ -34,8 +35,8 @@ DEVICE="cuda:0"
 DATE_TAG=$(date +"%m%d")
 
 # 体素化配置参数（与训练保持一致）
-USE_VOXELIZATION=false            # 是否启用体素化（true/false）
-VOXEL_SIZE=4                 # 体素大小 (适合医学点云)
+USE_VOXELIZATION=false          # 是否启用体素化（true/false）
+VOXEL_SIZE=4                    # 体素大小 (适合医学点云)
 VOXEL_GRID_SIZE=32              # 体素网格尺寸
 MAX_VOXEL_POINTS=100            # 每个体素最大点数
 MAX_VOXELS=20000                # 最大体素数量
@@ -49,10 +50,10 @@ else
     VOXELIZATION_PARAMS="--no-voxelization"
 fi
 
-# Mamba3D模型配置（与训练保持一致）
+# Mamba3D-v2 loss2模型配置（与训练保持一致）
 DIM_K=1024                    # 特征维度
-NUM_MAMBA_BLOCKS=1            # Mamba块数量
-D_STATE=8                     # 状态空间维度
+NUM_MAMBA_BLOCKS=3            # Mamba块数量
+D_STATE=16                    # 状态空间维度
 EXPAND=2                      # 扩展因子
 SYMFN="max"                   # 聚合函数：max, avg, 或 selective
 MAX_ITER=20                   # LK最大迭代次数
@@ -75,37 +76,36 @@ VISUALIZE_PERT="" # 如需可视化，设置为 "--visualize-pert pert_010.csv p
 VISUALIZE_SAMPLES=3
 
 # 模型路径（自动查找最新）
-MODEL_DIR="/SAN/medic/MRpcr/results/mamba3d_c3vd"
-MAMBA3D_MODEL_PREFIX="${MODEL_DIR}/mamba3d_pointlk_${DATE_TAG}"
-MAMBA3D_MODEL="${MAMBA3D_MODEL_PREFIX}_model_best.pth"
+MODEL_DIR="/SAN/medic/MRpcr/results/mamba_v2_c3vd"
+MAMBA_V2_LOSS2_MODEL_PREFIX="${MODEL_DIR}/mamba_v2_pointlk_${DATE_TAG}_loss2"
+MAMBA_V2_LOSS2_MODEL="${MAMBA_V2_LOSS2_MODEL_PREFIX}_model_best.pth"
 
-if [ ! -f "${MAMBA3D_MODEL}" ]; then
-    echo "⚠️ 未找到今日Mamba3D模型: ${MAMBA3D_MODEL}"
-    # 修改查找逻辑以匹配文件名 (mamba3d_pointlk_... 或 mamba3d_pointlk_resume_...)
-    LATEST_MODEL=$(find ${MODEL_DIR} -name "mamba3d_pointlk_*_model_best.pth" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -f2- -d' ')
+if [ ! -f "${MAMBA_V2_LOSS2_MODEL}" ]; then
+    echo "⚠️ 未找到今日Mamba3D-v2 loss2模型: ${MAMBA_V2_LOSS2_MODEL}"
+    # 修改查找逻辑以匹配文件名 (mamba_v2_pointlk_*_loss2_model_best.pth)
+    LATEST_MODEL=$(find ${MODEL_DIR} -name "mamba_v2_pointlk_*_loss2_model_best.pth" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -f2- -d' ')
     if [ -n "${LATEST_MODEL}" ] && [ -f "${LATEST_MODEL}" ]; then
-        MAMBA3D_MODEL="${LATEST_MODEL}"
-        echo "✅ 找到最新Mamba3D模型: ${MAMBA3D_MODEL}"
+        MAMBA_V2_LOSS2_MODEL="${LATEST_MODEL}"
+        echo "✅ 找到最新Mamba3D-v2 loss2模型: ${MAMBA_V2_LOSS2_MODEL}"
     else
-        echo "❌ 错误: 未找到任何Mamba3D模型文件!"
+        echo "❌ 错误: 未找到任何Mamba3D-v2 loss2模型文件!"
         exit 1
     fi
 else
-    echo "✅ 使用今日Mamba3D模型: ${MAMBA3D_MODEL}"
+    echo "✅ 使用今日Mamba3D-v2 loss2模型: ${MAMBA_V2_LOSS2_MODEL}"
 fi
 
 # 提取模型前缀用于日志记录
-MAMBA3D_MODEL_PREFIX=$(basename "${MAMBA3D_MODEL}" | sed 's/_model_best\.pth$//')
-
+MAMBA_V2_LOSS2_MODEL_PREFIX=$(basename "${MAMBA_V2_LOSS2_MODEL}" | sed 's/_model_best\.pth$//')
 
 # 检查指定的模型文件是否存在
-if [ ! -f "${MAMBA3D_MODEL}" ]; then
-    echo "❌ 错误: 指定的Mamba3D模型文件不存在: ${MAMBA3D_MODEL}"
+if [ ! -f "${MAMBA_V2_LOSS2_MODEL}" ]; then
+    echo "❌ 错误: 指定的Mamba3D-v2 loss2模型文件不存在: ${MAMBA_V2_LOSS2_MODEL}"
     echo "请确保模型文件路径正确"
     exit 1
 else
-    echo "✅ 使用指定的Mamba3D模型: ${MAMBA3D_MODEL}"
-    MODEL_SIZE=$(du -h "${MAMBA3D_MODEL}" | cut -f1)
+    echo "✅ 使用指定的Mamba3D-v2 loss2模型: ${MAMBA_V2_LOSS2_MODEL}"
+    MODEL_SIZE=$(du -h "${MAMBA_V2_LOSS2_MODEL}" | cut -f1)
     echo "📊 模型文件大小: ${MODEL_SIZE}"
 fi
 
@@ -114,12 +114,12 @@ PERTURBATION_DIR="/SAN/medic/MRpcr/PointNetLK_c3vd/gt"
 GT_POSES_FILE="/SAN/medic/MRpcr/PointNetLK_c3vd/gt_poses.csv"
 
 # 测试结果输出目录
-TEST_RESULTS_DIR="/SAN/medic/MRpcr/results/mamba3d_c3vd/test_results"
+TEST_RESULTS_DIR="/SAN/medic/MRpcr/results/mamba_v2_c3vd/test_results_2"
 TEST_LOG="${TEST_RESULTS_DIR}/test_log_${DATE_TAG}.log"
 
 # 打印配置信息
-echo "========== Mamba3D配准模型测试配置 =========="
-echo "🧠 模型类型: Mamba3D配准模型"
+echo "========== Mamba3D-v2 loss2配准模型测试配置 =========="
+echo "🧠 模型类型: Mamba3D-v2 loss2配准模型"
 echo "📂 数据集路径: ${DATASET_PATH}"
 echo "📄 类别文件: ${CATEGORY_FILE}"
 echo "🔗 配对模式: ${PAIR_MODE}"
@@ -139,7 +139,7 @@ if [ "${USE_VOXELIZATION}" = "true" ]; then
     echo "   - 最小体素点数比例: ${MIN_VOXEL_POINTS_RATIO}"
 fi
 echo ""
-echo "🔧 Mamba3D参数:"
+echo "🔧 Mamba3D-v2 loss2参数:"
 echo "   - 特征维度: ${DIM_K}"
 echo "   - Mamba块数量: ${NUM_MAMBA_BLOCKS}"
 echo "   - 状态空间维度: ${D_STATE}"
@@ -149,7 +149,7 @@ echo "   - LK最大迭代: ${MAX_ITER}"
 echo "   - LK步长: ${DELTA}"
 echo ""
 echo "📁 模型文件:"
-echo "   - 配准模型: ${MAMBA3D_MODEL}"
+echo "   - 配准模型: ${MAMBA_V2_LOSS2_MODEL}"
 echo "   - 扰动目录: ${PERTURBATION_DIR}"
 echo "   - GT姿态文件: ${GT_POSES_FILE}"
 echo ""
@@ -225,7 +225,7 @@ else
 fi
 
 echo ""
-echo "========== 开始Mamba3D配准模型测试 =========="
+echo "========== 开始Mamba3D-v2 loss2配准模型测试 =========="
 echo "🚀 即将开始两轮测试..."
 echo "⏱️  预计测试时间: ~60-120分钟（依据扰动文件数量和样本数量）"
 if [ "${USE_VOXELIZATION}" = "true" ]; then
@@ -249,7 +249,7 @@ echo "📁 结果存储: 各角度子目录（angle_000 到 angle_090）"
 echo ""
 
 # 第一轮测试的输出前缀
-TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results"
+TEST_OUTPUT_PREFIX_ROUND1="${TEST_RESULTS_DIR}/results_loss2"
 
 # 运行第一轮测试
 echo "🚀 开始第一轮测试..."
@@ -267,13 +267,13 @@ ${PY3} test_pointlk.py \
   --pair-mode ${PAIR_MODE} \
   ${REFERENCE_PARAM} \
   --perturbation-dir ${PERTURBATION_DIR} \
-  --model-type mamba3d \
+  --model-type mamba3d_v2 \
   --dim-k ${DIM_K} \
   --num-mamba-blocks ${NUM_MAMBA_BLOCKS} \
   --d-state ${D_STATE} \
   --expand ${EXPAND} \
   --symfn ${SYMFN} \
-  --pretrained ${MAMBA3D_MODEL} \
+  --pretrained ${MAMBA_V2_LOSS2_MODEL} \
   ${VOXELIZATION_PARAMS} \
   ${VISUALIZE_PARAMS}
 
@@ -318,8 +318,8 @@ echo "📁 结果存储: gt 子目录"
 echo ""
 
 # 第二轮测试的输出前缀（指向gt子目录）
-TEST_OUTPUT_PREFIX_ROUND2="${TEST_RESULTS_DIR}/gt/results"
-TEST_LOG_ROUND2="${TEST_RESULTS_DIR}/gt/test_log_gt_${DATE_TAG}.log"
+TEST_OUTPUT_PREFIX_ROUND2="${TEST_RESULTS_DIR}/gt/results_loss2"
+TEST_LOG_ROUND2="${TEST_RESULTS_DIR}/gt/test_log_gt_${DATE_TAG}_loss2.log"
 
 echo "🚀 开始第二轮测试..."
 echo "📄 直接使用GT姿态文件: ${GT_POSES_FILE}"
@@ -340,13 +340,13 @@ ${PY3} test_pointlk.py \
   --pair-mode ${PAIR_MODE} \
   ${REFERENCE_PARAM} \
   --perturbation-file ${GT_POSES_FILE} \
-  --model-type mamba3d \
+  --model-type mamba3d_v2 \
   --dim-k ${DIM_K} \
   --num-mamba-blocks ${NUM_MAMBA_BLOCKS} \
   --d-state ${D_STATE} \
   --expand ${EXPAND} \
   --symfn ${SYMFN} \
-  --pretrained ${MAMBA3D_MODEL} \
+  --pretrained ${MAMBA_V2_LOSS2_MODEL} \
   ${VOXELIZATION_PARAMS} \
   ${VISUALIZE_PARAMS}
 
@@ -397,9 +397,9 @@ echo "📋 GT测试日志: ${TEST_LOG_ROUND2}"
 echo ""
 echo "📊 最终测试结果汇总:"
 
-# 统计角度目录（第一轮测试被注释掉，角度目录数为0）
+# 统计角度目录
 ANGLE_DIRS=$(find "${TEST_RESULTS_DIR}" -type d -name "angle_*" 2>/dev/null | wc -l)
-echo "   - 角度测试目录数: ${ANGLE_DIRS}（第一轮测试已注释掉）"
+echo "   - 角度测试目录数: ${ANGLE_DIRS}"
 
 # 统计GT目录结果
 GT_RESULT_FILES=$(find "${TEST_RESULTS_DIR}/gt" -name "*.log" -type f 2>/dev/null | wc -l)
@@ -412,14 +412,14 @@ echo "   - 总结果文件数量: ${TOTAL_RESULT_FILES}"
 echo ""
 echo "📂 结果目录结构:"
 echo "   ${TEST_RESULTS_DIR}/"
-echo "   ├── angle_*/ (第一轮：角度扰动测试 - 已注释掉)"
+echo "   ├── angle_*/ (第一轮：角度扰动测试)"
 echo "   ├── gt/       (第二轮：GT姿态测试)"
-echo "   ├── test_log_${DATE_TAG}.log (主测试日志 - 已注释掉)"
-echo "   └── gt/test_log_gt_${DATE_TAG}.log (GT测试日志)"
+echo "   ├── test_log_${DATE_TAG}.log (主测试日志)"
+echo "   └── gt/test_log_gt_${DATE_TAG}_loss2.log (GT测试日志)"
 
 # 保存测试配置信息
-CONFIG_FILE="${TEST_RESULTS_DIR}/mamba3d_test_${DATE_TAG}_config.txt"
-echo "🧠 Mamba3D配准模型双轮测试配置" > ${CONFIG_FILE}
+CONFIG_FILE="${TEST_RESULTS_DIR}/mamba_v2_loss2_test_${DATE_TAG}_config.txt"
+echo "🧠 Mamba3D-v2 loss2配准模型双轮测试配置" > ${CONFIG_FILE}
 echo "=====================================" >> ${CONFIG_FILE}
 echo "测试完成时间: $(date)" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
@@ -428,7 +428,7 @@ echo "第一轮: 角度扰动文件测试（gt 文件夹中的 pert_*.csv）" >>
 echo "第二轮: GT姿态文件测试（gt_poses.csv）" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
 echo "🔧 模型配置:" >> ${CONFIG_FILE}
-echo "模型类型: Mamba3D配准模型" >> ${CONFIG_FILE}
+echo "模型类型: Mamba3D-v2 loss2配准模型" >> ${CONFIG_FILE}
 echo "特征维度: ${DIM_K}" >> ${CONFIG_FILE}
 echo "Mamba块数量: ${NUM_MAMBA_BLOCKS}" >> ${CONFIG_FILE}
 echo "状态空间维度: ${D_STATE}" >> ${CONFIG_FILE}
@@ -462,7 +462,7 @@ echo "扰动目录（第一轮）: ${PERTURBATION_DIR}" >> ${CONFIG_FILE}
 echo "GT姿态文件（第二轮）: ${GT_POSES_FILE}" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
 echo "📁 模型文件:" >> ${CONFIG_FILE}
-echo "配准模型: ${MAMBA3D_MODEL}" >> ${CONFIG_FILE}
+echo "配准模型: ${MAMBA_V2_LOSS2_MODEL}" >> ${CONFIG_FILE}
 echo "" >> ${CONFIG_FILE}
 echo "📁 输出文件:" >> ${CONFIG_FILE}
 echo "第一轮测试结果: ${TEST_OUTPUT_PREFIX_ROUND1}" >> ${CONFIG_FILE}
@@ -477,7 +477,7 @@ echo ""
 echo "🎯 测试完成总结:"
 echo "📂 结果目录: ${TEST_RESULTS_DIR}"
 echo "📄 配置文件: ${CONFIG_FILE}"
-echo "🎯 配准模型: ${MAMBA3D_MODEL}"
+echo "🎯 配准模型: ${MAMBA_V2_LOSS2_MODEL}"
 echo "📋 第一轮（角度）日志: ${TEST_LOG}"
 echo "📋 第二轮（GT）日志: ${TEST_LOG_ROUND2}"
 if [ "${USE_VOXELIZATION}" = "true" ]; then
@@ -486,6 +486,6 @@ fi
 echo "⏰ 完成时间: $(date)"
 
 echo ""
-echo "🎉🎉🎉 Mamba3D配准模型双轮测试全部完成! 🎉🎉🎉" 
-echo "📊 第一轮：角度扰动测试（存储在angle_*目录中）- 已注释掉"
+echo "🎉🎉🎉 Mamba3D-v2 loss2配准模型双轮测试全部完成! 🎉🎉🎉" 
+echo "📊 第一轮：角度扰动测试（存储在angle_*目录中）"
 echo "📊 第二轮：GT姿态测试（存储在gt目录中）" 

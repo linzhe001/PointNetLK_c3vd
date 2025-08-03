@@ -75,33 +75,33 @@ TEST_RESULTS_DIR="/SAN/medic/MRpcr/results/attention_modelnet/test_results"
 TEST_LOG="${TEST_RESULTS_DIR}/test_log_${DATE_TAG}.log"
 
 # 第一轮测试：角度扰动文件
-echo "========== 第一轮测试：角度扰动文件 =========="
-${PY3} test_pointlk.py \
-  -o ${TEST_RESULTS_DIR}/results \
-  -i ${DATASET_PATH} \
-  -c ${CATEGORY_FILE} \
-  -l ${TEST_LOG} \
-  --dataset-type modelnet \
-  --num-points ${NUM_POINTS} \
-  --max-iter ${MAX_ITER} \
-  --delta ${DELTA} \
-  --device ${DEVICE} \
-  --max-samples ${MAX_SAMPLES_ROUND1} \
-  --perturbation-dir ${PERTURBATION_DIR} \
-  --no-voxelization \
-  --model-type attention \
-  --dim-k ${DIM_K} \
-  --num-attention-blocks ${NUM_ATTENTION_BLOCKS} \
-  --num-heads ${NUM_HEADS} \
-  --symfn ${SYMFN} \
-  --pretrained ${ATT_MODEL} \
-  ${VISUALIZE_PERT}
-if [ $? -ne 0 ]; then
-    echo "❌ 第一轮测试失败"
-    exit 1
-else
-    echo "✅ 第一轮测试完成"
-fi
+# echo "========== 第一轮测试：角度扰动文件 =========="
+# ${PY3} test_pointlk.py \
+#   -o ${TEST_RESULTS_DIR}/results \
+#   -i ${DATASET_PATH} \
+#   -c ${CATEGORY_FILE} \
+#   -l ${TEST_LOG} \
+#   --dataset-type modelnet \
+#   --num-points ${NUM_POINTS} \
+#   --max-iter ${MAX_ITER} \
+#   --delta ${DELTA} \
+#   --device ${DEVICE} \
+#   --max-samples ${MAX_SAMPLES_ROUND1} \
+#   --perturbation-dir ${PERTURBATION_DIR} \
+#   --no-voxelization \
+#   --model-type attention \
+#   --dim-k ${DIM_K} \
+#   --num-attention-blocks ${NUM_ATTENTION_BLOCKS} \
+#   --num-heads ${NUM_HEADS} \
+#   --symfn ${SYMFN} \
+#   --pretrained ${ATT_MODEL} \
+#   ${VISUALIZE_PERT}
+# if [ $? -ne 0 ]; then
+#     echo "❌ 第一轮测试失败"
+#     exit 1
+# else
+#     echo "✅ 第一轮测试完成"
+# fi
 
 # 第二轮测试：GT姿态文件
 echo "========== 第二轮测试：GT姿态文件 =========="

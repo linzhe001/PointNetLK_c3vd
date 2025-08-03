@@ -32,10 +32,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pa
 import ptlk
 # 添加attention模块导入
 # Import attention module
-from ptlk import attention_v1
-from ptlk import mamba3d_v1  # 导入Mamba3D模块
-from ptlk import fast_point_attention  # 导入快速点注意力模块
-from ptlk import cformer  # 导入Cformer模块
+# from ptlk import attention_v1
+# from ptlk import mamba3d_v1  # 导入Mamba3D模块
+# from ptlk import mamba3d_v3
+# from ptlk import mamba3d_v4
+# from ptlk import fast_point_attention  # 导入快速点注意力模块
+# from ptlk import cformer  # 导入Cformer模块
 
 # 添加必要的导入
 # Add necessary imports
@@ -96,8 +98,8 @@ def options(argv=None):
     
     # 添加模型选择参数 (与train_pointlk.py保持一致)
     # Add model selection parameter (consistent with train_pointlk.py)
-    parser.add_argument('--model-type', default='pointnet', choices=['pointnet', 'attention', 'mamba3d', 'fast_attention', 'cformer'],
-                        help='Select model type: pointnet, attention, mamba3d, fast_attention or cformer (default: pointnet)')
+    parser.add_argument('--model-type', default='pointnet', choices=['pointnet', 'attention', 'mamba3d', 'mamba3d_v2', 'fast_attention', 'cformer', 'mamba3d_v3', 'mamba3d_v4'],
+                        help='Select model type: pointnet, attention, mamba3d, mamba3d_v2, fast_attention or cformer (default: pointnet)')
     
     # 添加attention模型特定参数 (与train_pointlk.py保持一致)
     # Add attention model specific parameters (consistent with train_pointlk.py)
@@ -707,6 +709,7 @@ class Action:
         # 聚合函数设置 (与train_pointlk.py保持一致)
         self.sym_fn = None
         if args.model_type == 'attention':
+            from ptlk import attention_v1
             # 为attention模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = attention_v1.symfn_max
@@ -715,6 +718,7 @@ class Action:
             else:
                 self.sym_fn = attention_v1.symfn_attention_pool  # attention特有的聚合
         elif args.model_type == 'mamba3d':
+            from ptlk import mamba3d_v1
             # 为Mamba3D模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = mamba3d_v1.symfn_max
@@ -724,7 +728,68 @@ class Action:
                 self.sym_fn = mamba3d_v1.symfn_selective
             else:
                 self.sym_fn = mamba3d_v1.symfn_max  # 默认使用最大池化
+        elif args.model_type == 'mamba3d_v2':
+            from ptlk import mamba3d_v2
+            # 创建Mamba3D_v2模型
+            ptnet = mamba3d_v2.Mamba3D_features(
+                dim_k=self.dim_k, 
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            # 支持从Mamba3D_v2分类器加载预训练权重
+            if self.transfer_from and os.path.isfile(self.transfer_from):
+                try:
+                    pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                    ptnet.load_state_dict(pretrained_dict)
+                    print(f"成功加载Mamba3D_v2预训练权重: {self.transfer_from}")
+                except Exception as e:
+                    print(f"加载Mamba3D_v2预训练权重失败: {e}")
+                    print("继续使用随机初始化权重")
+        elif args.model_type == 'mamba3d_v3':
+            from ptlk import mamba3d_v3
+            # 创建Mamba3D_v3 (SE-Net)模型
+            ptnet = mamba3d_v3.Mamba3D_features(
+                dim_k=self.dim_k, 
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            # 支持从Mamba3D_v3分类器加载预训练权重
+            if self.transfer_from and os.path.isfile(self.transfer_from):
+                try:
+                    pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                    ptnet.load_state_dict(pretrained_dict)
+                    print(f"成功加载Mamba3D_v3预训练权重: {self.transfer_from}")
+                except Exception as e:
+                    print(f"加载Mamba3D_v3预训练权重失败: {e}")
+                    print("继续使用随机初始化权重")
+        elif args.model_type == 'mamba3d_v4':
+            from ptlk import mamba3d_v4
+            # 创建Mamba3D_v4 (CBAM)模型
+            ptnet = mamba3d_v4.Mamba3D_features(
+                dim_k=self.dim_k, 
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            # 支持从Mamba3D_v4分类器加载预训练权重
+            if self.transfer_from and os.path.isfile(self.transfer_from):
+                try:
+                    pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                    ptnet.load_state_dict(pretrained_dict)
+                    print(f"成功加载Mamba3D_v4预训练权重: {self.transfer_from}")
+                except Exception as e:
+                    print(f"加载Mamba3D_v4预训练权重失败: {e}")
+                    print("继续使用随机初始化权重")
         elif args.model_type == 'fast_attention':
+            from ptlk import fast_point_attention
             # 为快速点注意力模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = fast_point_attention.symfn_max
@@ -735,6 +800,7 @@ class Action:
             else:
                 self.sym_fn = fast_point_attention.symfn_max  # 默认使用最大池化
         elif args.model_type == 'cformer':
+            from ptlk import cformer
             # 为Cformer模型设置聚合函数
             if args.symfn == 'max':
                 self.sym_fn = cformer.symfn_max
@@ -796,6 +862,7 @@ class Action:
 
     def create_pointnet_features(self):
         if self.model_type == 'attention':
+            from ptlk import attention_v1
             # 创建attention模型
             ptnet = attention_v1.AttentionNet_features(
                 dim_k=self.dim_k, 
@@ -814,6 +881,7 @@ class Action:
                     print(f"加载attention预训练权重失败: {e}")
                     print("继续使用随机初始化权重")
         elif self.model_type == 'mamba3d':
+            from ptlk import mamba3d_v1
             # 创建Mamba3D模型
             ptnet = mamba3d_v1.Mamba3D_features(
                 dim_k=self.dim_k, 
@@ -832,7 +900,68 @@ class Action:
                 except Exception as e:
                     print(f"加载Mamba3D预训练权重失败: {e}")
                     print("继续使用随机初始化权重")
+        elif self.model_type == 'mamba3d_v2':
+            from ptlk import mamba3d_v2
+            # 创建Mamba3D_v2模型
+            ptnet = mamba3d_v2.Mamba3D_features(
+                dim_k=self.dim_k, 
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            # 支持从Mamba3D_v2分类器加载预训练权重
+            if self.transfer_from and os.path.isfile(self.transfer_from):
+                try:
+                    pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                    ptnet.load_state_dict(pretrained_dict)
+                    print(f"成功加载Mamba3D_v2预训练权重: {self.transfer_from}")
+                except Exception as e:
+                    print(f"加载Mamba3D_v2预训练权重失败: {e}")
+                    print("继续使用随机初始化权重")
+        elif self.model_type == 'mamba3d_v3':
+            from ptlk import mamba3d_v3
+            # 创建Mamba3D_v3 (SE-Net)模型
+            ptnet = mamba3d_v3.Mamba3D_features(
+                dim_k=self.dim_k, 
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            # 支持从Mamba3D_v3分类器加载预训练权重
+            if self.transfer_from and os.path.isfile(self.transfer_from):
+                try:
+                    pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                    ptnet.load_state_dict(pretrained_dict)
+                    print(f"成功加载Mamba3D_v3预训练权重: {self.transfer_from}")
+                except Exception as e:
+                    print(f"加载Mamba3D_v3预训练权重失败: {e}")
+                    print("继续使用随机初始化权重")
+        elif self.model_type == 'mamba3d_v4':
+            from ptlk import mamba3d_v4
+            # 创建Mamba3D_v4 (CBAM)模型
+            ptnet = mamba3d_v4.Mamba3D_features(
+                dim_k=self.dim_k, 
+                sym_fn=self.sym_fn,
+                scale=1,
+                num_mamba_blocks=self.num_mamba_blocks,
+                d_state=self.d_state,
+                expand=self.expand
+            )
+            # 支持从Mamba3D_v4分类器加载预训练权重
+            if self.transfer_from and os.path.isfile(self.transfer_from):
+                try:
+                    pretrained_dict = torch.load(self.transfer_from, map_location='cpu')
+                    ptnet.load_state_dict(pretrained_dict)
+                    print(f"成功加载Mamba3D_v4预训练权重: {self.transfer_from}")
+                except Exception as e:
+                    print(f"加载Mamba3D_v4预训练权重失败: {e}")
+                    print("继续使用随机初始化权重")
         elif self.model_type == 'fast_attention':
+            from ptlk import fast_point_attention
             # 创建快速点注意力模型
             ptnet = fast_point_attention.FastPointAttention_features(
                 dim_k=self.dim_k, 
@@ -850,6 +979,7 @@ class Action:
                     print(f"加载快速点注意力预训练权重失败: {e}")
                     print("继续使用随机初始化权重")
         elif self.model_type == 'cformer':
+            from ptlk import cformer
             # 创建Cformer模型
             ptnet = cformer.CFormer_features(
                 dim_k=self.dim_k, 

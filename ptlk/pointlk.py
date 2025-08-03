@@ -42,7 +42,7 @@ class PointLK(torch.nn.Module):
     def rsq(r):
         # |r| should be 0
         z = torch.zeros_like(r)
-        return torch.nn.functional.mse_loss(r, z, size_average=False)
+        return torch.nn.functional.mse_loss(r, z, reduction='sum')
 
     @staticmethod
     def comp(g, igt):
@@ -52,7 +52,7 @@ class PointLK(torch.nn.Module):
         assert g.size(2) == igt.size(2) and g.size(2) == 4
         A = g.matmul(igt)
         I = torch.eye(4).to(A).view(1, 4, 4).expand(A.size(0), 4, 4)
-        return torch.nn.functional.mse_loss(A, I, size_average=True) * 16
+        return torch.nn.functional.mse_loss(A, I, reduction='mean') * 16
 
     @staticmethod
     def do_forward(net, p0, p1, maxiter=10, xtol=1.0e-7, p0_zero_mean=True, p1_zero_mean=True):
@@ -132,7 +132,9 @@ class PointLK(torch.nn.Module):
         #f0 = self.ptnet(p0).unsqueeze(-1) # [B, K, 1]
         f0 = f0.unsqueeze(-1) # [B, K, 1]
         
-        f = self.ptnet(p.view(-1, num_points, 3)).view(batch_size, 6, -1).transpose(1, 2) # [B, K, 6]
+        # ptnet可能返回元组(全局特征, 局部特征)，我们只使用全局特征
+        f_out = self.ptnet(p.view(-1, num_points, 3))
+        f = (f_out[0] if isinstance(f_out, tuple) else f_out).view(batch_size, 6, -1).transpose(1, 2) # [B, K, 6]
 
         df = f0 - f # [B, K, 6]
         J = df / dt.unsqueeze(1)
@@ -149,12 +151,16 @@ class PointLK(torch.nn.Module):
 
         if training:
             # first, update BatchNorm modules
-            f0 = self.ptnet(p0)
-            f1 = self.ptnet(p1)
+            # ptnet可能返回元组(全局特征, 局部特征)，我们只使用全局特征
+            f0_out = self.ptnet(p0)
+            f0 = f0_out[0] if isinstance(f0_out, tuple) else f0_out
+            self.ptnet(p1)
         self.ptnet.eval() # and fix them.
 
         # re-calc. with current modules
-        f0 = self.ptnet(p0) # [B, N, 3] -> [B, K]
+        # ptnet可能返回元组(全局特征, 局部特征)，我们只使用全局特征
+        f0_out = self.ptnet(p0) # [B, N, 3] -> [B, K]
+        f0 = f0_out[0] if isinstance(f0_out, tuple) else f0_out
 
         # approx. J by finite difference
         dt = self.dt.to(p0).expand(batch_size, 6)
@@ -177,7 +183,8 @@ class PointLK(torch.nn.Module):
             self.last_err = err
             # Perhaps we can use MP-inverse, but,...
             # probably, self.dt is way too small...
-            f1 = self.ptnet(p1) # [B, N, 3] -> [B, K]
+            f1_out = self.ptnet(p1) # [B, N, 3] -> [B, K]
+            f1 = f1_out[0] if isinstance(f1_out, tuple) else f1_out
             r = f1 - f0
             self.ptnet.train(training)
             return r, g, itr
@@ -188,7 +195,9 @@ class PointLK(torch.nn.Module):
             self.prev_r = r
             p = self.transform(g.unsqueeze(1), p1) # [B, 1, 4, 4] x [B, N, 3] -> [B, N, 3]
             
-            f = self.ptnet(p) # [B, N, 3] -> [B, K]
+            # ptnet可能返回元组(全局特征, 局部特征)，我们只使用全局特征
+            f_out = self.ptnet(p) # [B, N, 3] -> [B, K]
+            f = f_out[0] if isinstance(f_out, tuple) else f_out
             
             r = f - f0
 

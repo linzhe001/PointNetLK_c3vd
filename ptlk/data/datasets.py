@@ -587,7 +587,7 @@ class C3VDDataset(torch.utils.data.Dataset):
 class C3VDset4tracking(torch.utils.data.Dataset):
     """C3VD配准跟踪数据集，支持体素化预处理和刚性变换"""
     
-    def __init__(self, dataset, rigid_transform, num_points=1024, use_voxelization=True, voxel_config=None):
+    def __init__(self, dataset, rigid_transform, num_points=1024, use_voxelization=False, voxel_config=None):
         """
         Args:
             dataset: C3VD基础数据集
@@ -702,7 +702,7 @@ class C3VDset4tracking_test(C3VDset4tracking):
     """用于测试的C3VD跟踪数据集，保留原始点云引用和文件路径"""
     
     def __init__(self, dataset, rigid_transform, num_points=1024, 
-                 use_voxelization=True, voxel_config=None):
+                 use_voxelization=False, voxel_config=None):
         """
         Args:
             dataset: C3VD基础数据集
@@ -874,7 +874,7 @@ class C3VDset4tracking_test_random_sample(C3VDset4tracking_test):
     每个扰动随机选择一个测试样本，总共测试扰动数量次
     """
     def __init__(self, dataset, rigid_transform, num_points=1024, 
-                 use_voxelization=True, voxel_config=None, random_seed=42):
+                 use_voxelization=False, voxel_config=None, random_seed=42):
         """
         Args:
             dataset: C3VD基础数据集
